@@ -17,7 +17,7 @@ export interface SegmentPayload {
 /** 某条转写段的译文，按 id 对应回原文行 */
 export interface TranslationPayload {
   id: number;
-  /** 译文文本；pending 阶段为占位空串 */
+  /** 译文文本；pending / failed 阶段为占位空串 */
   text: string;
   /**
    * true=翻译已派发、结果尚未到达（UI 在译文区显示等待动画）；
@@ -25,6 +25,13 @@ export interface TranslationPayload {
    * 同语言等「无需翻译」的场景不发本事件，故不会出现等待动画。
    */
   pending?: boolean;
+  /**
+   * true=该行翻译失败：结束等待动画并在该行显示失败标记。单条失败只影响本行，
+   * 不进入全局引擎状态通道（onTranslationStatus 的 error 专指引擎级故障）。
+   */
+  failed?: boolean;
+  /** 失败原文（宿主自由文本，供悬停提示/排查），仅 failed 时有值 */
+  error?: string;
 }
 
 /** 说话过程中实时更新的部分识别结果，text 为空表示清除 */

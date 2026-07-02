@@ -208,6 +208,8 @@ const trLineHeight = 'calc((var(--transcript-size) + 7px) * 1.45)';
           :text="line.text"
           :translation="line.translation"
           :translating="line.translating"
+          :failed="line.failed"
+          :failed-detail="line.failedDetail"
           dim
         />
       </transition-group>

@@ -10,6 +10,9 @@ export interface TranscriptLine {
   translation: string;
   /** 译文进行中：已派发翻译、结果未到，UI 在译文区显示等待动画。同语言/未开启翻译时恒 false */
   translating: boolean;
+  /** 该行翻译失败：在译文区显示失败标记（failedDetail 为宿主原始错误，供悬停提示） */
+  failed: boolean;
+  failedDetail?: string;
 }
 
 export const lines = reactive<TranscriptLine[]>([]);
@@ -58,6 +61,7 @@ export function registerTranscriptionListeners(): void {
       text: seg.text,
       translation: '',
       translating: false,
+      failed: false,
     });
     // 识别区里有实时识别文字时才做交接：把它定格成这条定稿文本、下一 tick 再清空，
     // 使向下淡出的正是落入确定句区的同一句（而非早期实时猜测）。识别区本就为空（无中间结果）则不动，停留「聆听中」。
@@ -77,10 +81,17 @@ export function registerTranscriptionListeners(): void {
     if (tr.pending) {
       // 翻译已开始、结果未到：显示等待动画
       line.translating = true;
+      line.failed = false;
+    } else if (tr.failed) {
+      // 该行翻译失败：结束等待动画、行内显示失败标记（不进全局引擎状态）
+      line.translating = false;
+      line.failed = true;
+      line.failedDetail = tr.error;
     } else {
       // 最终结果（空串表示无需翻译，仅结束等待、不展示）
       line.translation = tr.text;
       line.translating = false;
+      line.failed = false;
     }
   });
   bridge().onStatus((s) => {
@@ -129,6 +140,7 @@ export function registerTranscriptionListeners(): void {
       translationLoading.value = false;
       translationDownloading.value = false;
       translationFiles.value = [];
+      translationError.value = false; // 引擎恢复就绪，清除全局失败提示
     }
   });
 }

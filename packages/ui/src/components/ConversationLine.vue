@@ -2,13 +2,18 @@
 // 一行对话：时间 + 原文 + 可选译文。主页历史与归档详情共用。
 // dim=true 用于主页历史（弱化，让当前句更突出）。
 // translating=true 表示译文尚未到达、仍在翻译中：在译文区显示等待动画（归档详情不传，恒 false）。
+// failed=true 表示该行翻译失败：译文区显示失败标记，悬停可见 failedDetail 原始错误。
+import { useI18n } from 'vue-i18n';
 import TranslatingDots from './TranslatingDots.vue';
+const { t } = useI18n();
 defineProps<{
   time: string;
   text: string;
   translation?: string;
   dim?: boolean;
   translating?: boolean;
+  failed?: boolean;
+  failedDetail?: string;
 }>();
 </script>
 
@@ -29,11 +34,17 @@ defineProps<{
         {{ text }}
       </div>
       <div
-        v-if="translation || translating"
-        class="mt-1 border-l-2 border-blue-500 pl-2.5 text-[length:calc(var(--transcript-size)-1px)] leading-relaxed text-neutral-500 dark:text-neutral-400"
+        v-if="translation || translating || failed"
+        :class="[
+          'mt-1 border-l-2 pl-2.5 text-[length:calc(var(--transcript-size)-1px)] leading-relaxed',
+          failed && !translation && !translating
+            ? 'border-red-400/70 text-red-500/80'
+            : 'border-blue-500 text-neutral-500 dark:text-neutral-400',
+        ]"
       >
         <template v-if="translation">{{ translation }}</template>
-        <TranslatingDots v-else class="text-blue-500/70" />
+        <TranslatingDots v-else-if="translating" class="text-blue-500/70" />
+        <span v-else :title="failedDetail">{{ t('status.transFailedLine') }}</span>
       </div>
     </div>
   </div>

@@ -242,10 +242,6 @@ export function createWebBridge(): AppBridge {
         );
       },
       emitTranslation: (p) => translationCb.emit(p),
-      emitStatus: (st) => {
-        if (st.state === 'error') console.error('[translate]', st.error);
-        translationStatusCb.emit(st);
-      },
     });
   }
 

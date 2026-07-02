@@ -199,7 +199,6 @@ function translateSegment(segment: SegmentPayload): void {
     nativeLang: settings.nativeLang,
     translate: requestTranslate,
     emitTranslation: (p) => sendToRenderer('pipeline:translation', p),
-    emitStatus: (s) => sendToRenderer('translation:status', s),
   });
 }
 

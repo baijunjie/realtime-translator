@@ -1,11 +1,12 @@
 // 定稿段翻译的平台无关编排：三端（macOS 主进程 / Web / iOS 桥接）共用同一套
-// 「要不要翻 → pending → 引擎调用 → 字形归一化 → 回填/错误」流程，只把引擎调用
+// 「要不要翻 → pending → 引擎调用 → 字形归一化 → 回填/失败标记」流程，只把引擎调用
 // 本身（本地模型 / 云端 / 原生框架，各端传输方式不同）留给调用方注入。
 //
-// 状态事件（emitStatus）只反映引擎可用性：单次翻译进行中由 per-line 的 pending
-// 表达，这里不发 loading/ready；仅失败时发 error（UI 据此提示并结束所有等待动画）。
+// 单条翻译的成败全部经 per-line 的译文事件表达（pending / 最终结果 / failed），
+// 不触碰全局引擎状态通道——onTranslationStatus 的 error 专指引擎级故障
+// （模型加载失败、进程崩溃等），由各端引擎自身上报。
 import { planTranslation, type LocalModelSpec } from './local-spec';
-import type { TranslationPayload, TranslationStatusPayload } from '../types';
+import type { TranslationPayload } from '../types';
 
 /** 注入给平台引擎的一次翻译请求。 */
 export interface SegmentTranslateRequest {
@@ -30,10 +31,8 @@ export interface TranslateFinalizedSegmentOptions {
   nativeLang: string;
   /** 平台引擎调用：把 text 翻成目标语言，失败抛错 */
   translate: (req: SegmentTranslateRequest) => Promise<string>;
-  /** 译文事件（pending / 最终结果），三端分别接 IPC / 回调 */
+  /** 译文事件（pending / 最终结果 / failed），三端分别接 IPC / 回调 */
   emitTranslation: (p: TranslationPayload) => void;
-  /** 引擎状态事件（此处仅在失败时发 error） */
-  emitStatus: (s: TranslationStatusPayload) => void;
 }
 
 /**
@@ -41,8 +40,8 @@ export interface TranslateFinalizedSegmentOptions {
  * - `skip`：不发任何事件（不显示译文、不触发等待动画）。
  * - `script`：仅简繁字形不同，直接产出转换后的原文，不经引擎。
  * - `translate`：先发 pending（UI 显示等待动画），引擎产出后套 plan.toScript 做母语
- *   字形归一化（幂等，引擎已自行处理也不受影响）再回填；失败发 error 状态并以空串
- *   结束该行等待动画。
+ *   字形归一化（幂等，引擎已自行处理也不受影响）再回填；失败发 failed 事件，
+ *   结束该行等待动画并在该行显示失败标记。
  */
 export async function translateFinalizedSegment(
   opts: TranslateFinalizedSegmentOptions,
@@ -68,7 +67,11 @@ export async function translateFinalizedSegment(
     });
     opts.emitTranslation({ id: segment.id, text: plan.toScript ? plan.toScript(text) : text });
   } catch (e) {
-    opts.emitStatus({ state: 'error', error: e instanceof Error ? e.message : String(e) });
-    opts.emitTranslation({ id: segment.id, text: '' }); // 结束该行等待动画
+    opts.emitTranslation({
+      id: segment.id,
+      text: '',
+      failed: true,
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 }
