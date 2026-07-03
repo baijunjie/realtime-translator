@@ -35,7 +35,14 @@ function build(): Translator {
 /** 懒加载翻译器，并把加载/下载进度报回主进程；重复调用幂等 */
 function ensure(): Promise<Translator> {
   if (!translator) {
-    translator = build();
+    try {
+      translator = build();
+    } catch (err) {
+      // 构造期错误（如主进程与本产物版本错位导致的未知引擎 id）：报引擎级错误并拒绝本次
+      // 请求。若任由异常从消息回调逃逸，子进程会整个崩掉并被主进程反复重启（崩溃循环）。
+      post({ type: 'status', payload: { state: 'error', error: (err as Error).message } });
+      return Promise.reject(err);
+    }
   }
   const instance = translator;
   if (!ready) {
