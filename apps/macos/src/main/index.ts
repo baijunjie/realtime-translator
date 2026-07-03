@@ -422,6 +422,16 @@ ipcMain.on('mic:open-settings', () => {
   }
 });
 
+// 系统音频录制权限被拒后的引导：打开「屏幕与系统音频录制」隐私页
+// （ScreenCapture 锚点即该合并页，含「仅录制系统音频」分栏）。
+ipcMain.on('system-audio:open-settings', () => {
+  if (process.platform === 'darwin') {
+    void shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+    );
+  }
+});
+
 ipcMain.handle('setup:get-status', (_event, modelId: string): SetupStatus => ({
   asrReady: asrModelsReady(MODELS_DIR, modelId),
 }));

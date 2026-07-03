@@ -19,6 +19,7 @@ const api: ElectronApi = {
   sendAudio: (samples) => ipcRenderer.send('pipeline:audio', samples),
   getMicStatus: () => ipcRenderer.invoke('mic:get-status'),
   openMicSettings: () => ipcRenderer.send('mic:open-settings'),
+  openSystemAudioSettings: () => ipcRenderer.send('system-audio:open-settings'),
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
   testCloud: (cfg) => ipcRenderer.invoke('translation:test-cloud', cfg),

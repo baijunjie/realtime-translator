@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, h } from 'vue';
+import { computed, ref, h, watch } from 'vue';
 import { NButton, NModal, NInput, NDropdown, NTooltip } from 'naive-ui';
 import type { DropdownMixedOption } from 'naive-ui/es/dropdown/src/interface';
 import { Settings, Trash2, Archive, Library, Eraser, LoaderCircle, TriangleAlert, MoreHorizontal, Mic, MonitorSpeaker, Square, RefreshCw } from '@lucide/vue';
@@ -228,11 +228,41 @@ function onDownloadDone(): void {
   void proceedToRecord();
 }
 
-// 模型就绪后的权限 + 启动流程。麦克风音源走权限说明流程；系统音源直接启动（授权由宿主处理，
-// 被拒会以 system-audio-permission 错误码回来）。
+// 系统音频权限说明弹窗：CoreAudio Tap 无权限查询 API，无法像麦克风那样按状态分流——
+// 「首次说明」用本地持久化标记补齐（本机只提示一次），「已拒绝去设置」在采集报
+// system-audio-permission 错误码时事后弹出。
+const SYS_AUDIO_PROMPTED_KEY = 'rt.systemAudioPrompted';
+const sysAudioModal = ref<'' | 'ask' | 'denied'>('');
+const showSysAudioModal = computed({
+  get: () => sysAudioModal.value !== '',
+  set: (v: boolean) => {
+    if (!v) sysAudioModal.value = '';
+  },
+});
+watch(errorCode, (code) => {
+  if (code === 'system-audio-permission') sysAudioModal.value = 'denied';
+});
+
+function confirmSysAudio(): void {
+  localStorage.setItem(SYS_AUDIO_PROMPTED_KEY, '1');
+  sysAudioModal.value = '';
+  toggleRecording(); // 此时才触发系统音频录制的系统授权
+}
+
+function openSysAudioSettings(): void {
+  bridge().openSystemAudioSettings?.();
+  sysAudioModal.value = '';
+}
+
+// 模型就绪后的权限 + 启动流程。麦克风音源走权限说明流程；系统音源首次先弹说明，
+// 之后直接启动（授权由宿主处理，被拒会以 system-audio-permission 错误码回来）。
 async function proceedToRecord(): Promise<void> {
   const usesSystem = supportsSystemAudio && settings.value?.audioSource === 'system';
   if (usesSystem) {
+    if (!localStorage.getItem(SYS_AUDIO_PROMPTED_KEY)) {
+      sysAudioModal.value = 'ask';
+      return;
+    }
     toggleRecording();
     return;
   }
@@ -428,6 +458,27 @@ function openMicSettings(): void {
             {{ t('mic.openSettings') }}
           </n-button>
           <n-button v-else type="primary" @click="confirmMic">{{ t('mic.allow') }}</n-button>
+        </div>
+      </template>
+    </n-modal>
+
+    <!-- 系统音频权限弹窗：首次说明（本机一次）/ 被拒后引导去「屏幕与系统音频录制」设置 -->
+    <n-modal
+      v-model:show="showSysAudioModal"
+      preset="card"
+      :title="sysAudioModal === 'denied' ? t('sysAudio.deniedTitle') : t('sysAudio.title')"
+      style="width: 420px; max-width: 90vw"
+    >
+      <p class="text-sm leading-relaxed text-neutral-600 dark:text-neutral-300">
+        {{ sysAudioModal === 'denied' ? t('sysAudio.deniedDesc') : t('sysAudio.desc') }}
+      </p>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <n-button @click="sysAudioModal = ''">{{ t('mic.cancel') }}</n-button>
+          <n-button v-if="sysAudioModal === 'denied'" type="primary" @click="openSysAudioSettings">
+            {{ t('mic.openSettings') }}
+          </n-button>
+          <n-button v-else type="primary" @click="confirmSysAudio">{{ t('mic.allow') }}</n-button>
         </div>
       </template>
     </n-modal>

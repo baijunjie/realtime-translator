@@ -63,6 +63,12 @@ export interface AppBridge {
   getMicStatus(): Promise<MicPermission>;
   /** 打开系统设置的麦克风隐私页（macOS） */
   openMicSettings(): void;
+  /**
+   * 打开系统设置的「屏幕与系统音频录制」隐私页（macOS，系统音频录制权限被拒时引导）。
+   * 仅提供系统音频采集的端实现；系统音频权限状态无法查询（CoreAudio Tap 无查询 API），
+   * 故引导只能在采集报 system-audio-permission 错误后事后进行。
+   */
+  openSystemAudioSettings?(): void;
   getSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
   /**

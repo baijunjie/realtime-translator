@@ -63,6 +63,13 @@ const messages = {
       openSettings: 'Open System Settings',
       title: 'Microphone permission needed',
     },
+    sysAudio: {
+      deniedDesc:
+        'System audio recording was denied. Allow Realtime Translator in System Settings › Privacy & Security › Screen & System Audio Recording, then try again.',
+      deniedTitle: 'System audio recording denied',
+      desc: 'Recording captures the audio your Mac is playing for on-device speech recognition and translation. macOS will ask for the System Audio Recording permission. Audio is processed locally and never uploaded.',
+      title: 'System audio recording permission needed',
+    },
     models: {
       m2m100: 'M2M-100 (Lightweight)',
       m2m100_1_2b: 'M2M-100 1.2B (Higher quality)',
@@ -190,6 +197,13 @@ const messages = {
       openSettings: 'システム設定を開く',
       title: 'マイクの許可が必要です',
     },
+    sysAudio: {
+      deniedDesc:
+        'システムオーディオ録音へのアクセスが拒否されています。システム設定 › プライバシーとセキュリティ › 画面とシステムオーディオの収録 で Realtime Translator を許可してから、もう一度お試しください。',
+      deniedTitle: 'システムオーディオ録音が拒否されました',
+      desc: '録音では Mac が再生している音声を取り込み、端末内で音声認識・翻訳を行います。macOS がシステムオーディオ録音の許可を求めます。音声はローカルで処理され、アップロードされません。',
+      title: 'システムオーディオ録音の許可が必要です',
+    },
     models: {
       m2m100: 'M2M-100（軽量）',
       m2m100_1_2b: 'M2M-100 1.2B（高品質）',
@@ -316,6 +330,13 @@ const messages = {
       openSettings: '시스템 설정 열기',
       title: '마이크 권한 필요',
     },
+    sysAudio: {
+      deniedDesc:
+        '시스템 오디오 녹음이 거부되었습니다. 시스템 설정 › 개인정보 보호 및 보안 › 화면 및 시스템 오디오 녹음에서 Realtime Translator를 허용한 후 다시 시도하세요.',
+      deniedTitle: '시스템 오디오 녹음 거부됨',
+      desc: '녹음 시 Mac에서 재생 중인 오디오를 캡처하여 기기 내에서 음성 인식·번역합니다. macOS가 시스템 오디오 녹음 권한을 요청합니다. 오디오는 로컬에서만 처리되며 업로드되지 않습니다.',
+      title: '시스템 오디오 녹음 권한이 필요합니다',
+    },
     models: {
       m2m100: 'M2M-100 (경량)',
       m2m100_1_2b: 'M2M-100 1.2B (고품질)',
@@ -439,6 +460,13 @@ const messages = {
       desc: '开始后将实时录制麦克风音频，用于语音的识别与翻译。音频仅在本机处理，不会上传。',
       openSettings: '打开系统设置',
       title: '需要麦克风权限',
+    },
+    sysAudio: {
+      deniedDesc:
+        '系统音频录制权限已被拒绝。请在 系统设置 › 隐私与安全性 › 屏幕与系统音频录制 中允许 Realtime Translator，然后重试。',
+      deniedTitle: '系统音频录制被拒绝',
+      desc: '录音将采集 Mac 正在播放的声音，在本机完成语音识别与翻译。macOS 会请求「系统音频录制」权限。音频仅在本机处理，不会上传。',
+      title: '需要系统音频录制权限',
     },
     models: {
       m2m100: 'M2M-100（轻量）',
