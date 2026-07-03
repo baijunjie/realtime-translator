@@ -80,6 +80,26 @@ gh release view v<ver> --json assets -q '.assets[] | "\(.name)  \(.size)  \(.upd
 
 资产的 `updatedAt` 应为刚才的上传时间（重发时用它确认覆盖成功）。
 
+## 模型资产（models-v1）
+
+新模型（识别 / 本地翻译）上架步骤：
+
+1. **上传资产**：资产按 `<模型id>-<原文件名>` 扁平命名（公共依赖 Silero VAD 无前缀，直接 `silero_vad.onnx`），全部上传到同一 `models-v1` release：
+
+   ```bash
+   gh release upload models-v1 <files> --clobber
+   ```
+
+2. **登记注册表**（`packages/core`：ASR 见 `models.ts`，翻译见 `translation/local-spec.ts`）：
+   - 每个文件填自托管 GitHub Release 直链 `url`（`ghModelAsset('<模型id>-<原文件名>')`）——**macOS / iOS** 走这个。
+   - `platforms` 含 `web` 的模型，另给每个文件填上游、发 CORS 头的 `webUrl`（如 HuggingFace resolve 直链）：GitHub Release 资产**不发 CORS 头**，浏览器 fetch 用不了，web 只能走 `webUrl`。macOS-only 模型（如 M2M100-1.2B）无需 `webUrl`。
+
+3. **核验 URL**：对注册表里全部 URL 做 HEAD 核验，确认最终都 200（GitHub Release 会 302 到 CDN，`-L` 跟随后应为 200）：
+
+   ```bash
+   curl -sIL <url> | grep -E '^HTTP'   # 期望最后一行 200
+   ```
+
 ## 红线
 
 - **正式版（非 beta）发布后，不得再重置/强推已发布的 tag**。

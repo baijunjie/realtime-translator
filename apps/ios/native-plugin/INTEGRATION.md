@@ -128,7 +128,7 @@ The app **downloads the models on first run** (no large binaries committed / bun
 
 ```
 <App>/Library/Application Support/models/
-  silero_vad.onnx                                                  (~2.2 MB)
+  silero_vad.onnx                                                  (~0.6 MB)
   sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt    (~0.3 MB)
   sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx (~228 MB)
 ```

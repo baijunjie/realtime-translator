@@ -8,34 +8,35 @@
 
 ## 功能
 
-- 实时麦克风转写：中文 / 日语 / 英语 / 韩语 / 粤语（自动检测）
+- 实时麦克风转写：中文 / 日语 / 英语 / 韩语（可自动检测，或在设置中锁定识别语言——锁定后能显著减少短句的语种误判）
+- 可选识别模型：SenseVoice（多语言，全平台默认），以及 Paraformer（中文）、ReazonSpeech（日语）、Parakeet（英语）三个单语专用模型（macOS，网页亦可实验性启用）
 - 实时字幕——说话过程中即显示部分结果，语音段结束后定稿
-- **母语驱动**——首次启动选择母语（简体 / 繁體中文、日语、英语、韩语）；整个界面用母语呈现，开启翻译后其他语言统一翻成母语
+- **母语驱动**——首次启动选择母语（中文 / 日语 / 英语 / 韩语）；整个界面用母语呈现，开启翻译后其他语言统一翻成母语（中文译文统一归一化为简体）
+- 音频来源可切换（macOS）：麦克风，或系统音频（采集 Mac 正在播放的声音，需 macOS 14.2+）；网页 / iOS 仅麦克风
 - 翻译引擎可切换：
-  - **本地**（默认）：在本机运行——首次下载后离线可用，文本不出机器（macOS / 网页用 M2M100，iOS 用 Apple 的 Translation 框架）
+  - **本地**（默认）：在本机运行——下载后离线可用，文本不出机器。macOS 可选 M2M-100（轻量，约 640MB，默认）或 M2M-100 1.2B（更高质量，约 1.5GB）；网页仅 M2M-100；iOS 用 Apple 的 Translation 框架
   - **云端**（可选）：任意 OpenAI 兼容端点（在设置里填 Base URL / API Key / 模型，密钥仅存本机）——启用即表示文本会发往第三方
 - 对话归档——保存一次会话，之后可重新查看
-- 设置页：母语、转写字体大小、主题、翻译方式（底部显示构建版本号）
-- 模型在应用打开时预加载——点「开始录音」即刻进入录音
-- 引导式模型下载：专门的下载页、逐文件进度、停滞检测；平台可判断蜂窝网络时（iOS、部分浏览器）先弹确认
+- 设置页：母语、识别语言与识别模型、音频来源、转写字体大小、主题、翻译方式；「模型管理」标签页可查看 / 下载 / 删除各模型（底部显示构建版本号）
+- 按需下载模型——点「开始录音」（或在设置里选中尚未下载的模型）时弹出确认弹窗，列出模型名与大小，确认后统一按字节进度下载、完成即自动继续；已下载的模型会在应用打开时预加载，点「开始录音」即刻进入录音
 - 纯 CPU 实时运行（Apple Silicon 实测 RTF ≈ 0.03），无需 GPU
 
 ## 使用
 
-1. **首次启动**——在引导页选择你的语言。
-2. 点击**开始录音**——字幕随说话实时出现。
-3. 在设置里选择**翻译方式**（本地模型 / 云端 / 关闭）——每行下方显示母语译文。首次启用本地模型会先进入下载页（约 630MB，逐文件进度）。
-4. 点 **⚙ 设置**——可改母语、字体大小、主题、翻译方式（及云端凭证）。
+1. **首次启动**——在引导页选择你的母语。
+2. 点击**开始录音**——若所选识别模型尚未下载，会先弹出确认弹窗（列出模型名与大小），确认后下载、完成即自动开始；字幕随说话实时出现。
+3. 在设置里选择**翻译方式**（本地模型 / 云端 / 关闭）——每行下方显示母语译文。首次启用某个本地翻译模型时，同样会先弹出下载确认弹窗（如 M2M-100 约 640MB）。
+4. 点 **⚙ 设置**——可改母语、识别语言与识别模型、音频来源、字体大小、主题、翻译方式（及云端凭证）；「模型管理」标签页可查看、下载或删除各模型。
 
-请求麦克风前，应用会先说明用途；随后系统才弹出授权提示。
+请求麦克风或系统音频前，应用会先在应用内说明用途，随后系统才弹出授权提示；若曾被拒绝，可一键打开对应的系统设置页。
 
 ## 项目结构
 
 **pnpm workspace monorepo**——共享逻辑/UI，每个平台一个包。三个平台都渲染**同一套 `@rt/ui`**，差别只在注入的 `AppBridge`：
 
-- `packages/core`（`@rt/core`）——平台无关 TS：领域类型、设置/归档逻辑、翻译（`Translator` + 云端 + 简繁转换）、ASR 模型清单、平台能力桥接接口 `AppBridge`。
+- `packages/core`（`@rt/core`）——平台无关 TS：领域类型、设置/归档逻辑、翻译（`Translator` + 云端 + 中文简体归一化）、ASR 与本地翻译的多模型注册表、平台能力桥接接口 `AppBridge`。
 - `packages/ui`（`@rt/ui`）——共享 Vue 3 界面；仅通过注入的 `AppBridge` 触达平台（不直接用 `window.api`）。
-- `apps/macos`（`@rt/macos`）——Electron 应用；以 utilityProcess 子进程实现 ASR/翻译、采音、fs 存储等 `AppBridge`，并承载 `@rt/ui`。
+- `apps/macos`（`@rt/macos`）——Electron 应用；实现 `AppBridge`（采音、fs 存储，ASR 跑在 utilityProcess、翻译跑在纯 Node 子进程），并承载 `@rt/ui`。
 - `apps/ios`（`@rt/ios`）——Capacitor 应用，已可用：原生插件在设备端跑 sherpa-onnx 做识别（iOS xcframework），端上翻译用 Apple 的 Translation 框架（iOS 18+）。详见 `apps/ios/native-plugin/INTEGRATION.md`。
 - `apps/web`（`@rt/web`）——可安装的浏览器 **PWA**；ASR 用单线程 WebAssembly 在 Web Worker 里跑 sherpa-onnx，本地翻译用 Transformers.js（M2M100）在 Web Worker 里跑，存储用 IndexedDB。线上地址 https://baijunjie.github.io/realtime-translator/ 。
 - `assets/`——共享品牌源（`icon.svg` / `icon.png`），各平台由它生成自己的图标格式。
@@ -52,7 +53,7 @@ pnpm --filter @rt/web dev   # 跑浏览器 PWA 开发服务器（→ @rt/web）
 
 iOS 见 `apps/ios/native-plugin/INTEGRATION.md`（需把原生插件接入 Capacitor iOS 壳，依赖 Xcode 工具链，Translation 框架还需真机）。
 
-macOS / 网页首次启动时应用会自行下载 ASR 模型（有下载页）；本地翻译模型在设置里启用本地翻译时经专门的下载页下载。
+macOS / 网页上，识别模型与本地翻译模型都按需下载：首次点「开始录音」或在设置里选中尚未下载的模型时，先弹出确认弹窗再下载。
 
 其他脚本：`pnpm build`、`pnpm type-check`。单包：`pnpm --filter @rt/macos <script>`（如 `clean`、`test-translate`）。
 
@@ -70,8 +71,8 @@ pnpm dist:dir    # 仅生成未压缩 .app（更快，调试用）
 线上地址 **https://baijunjie.github.io/realtime-translator/** ——可安装，首次加载后离线可用（模型与应用外壳都会缓存）。
 
 - ASR 用**单线程 WebAssembly** 在 Web Worker 里跑 sherpa-onnx——无需 COOP/COEP 头，因此能免费托管在 GitHub Pages。
-- 模型首次使用时从 CDN 拉取（SenseVoice 走 HuggingFace；Silero VAD 因 GitHub Releases 无 CORS 而随应用同源打包），缓存进 Cache Storage；设置/归档存在 IndexedDB。
-- 由 GitHub Actions 工作流（`.github/workflows/deploy-web.yml`）在每次推送到 `main` 时部署。
+- 模型首次使用时从上游 CDN 拉取：网页因 GitHub Release 资产不发 CORS 头，识别与翻译模型都从上游 HuggingFace 下载（Silero VAD 仍随应用同源分发），下载后缓存进 Cache Storage；设置 / 归档存在 IndexedDB。
+- 由 GitHub Actions 工作流（`.github/workflows/ci.yml` 的 `deploy-web` job）在每次推送到 `main` 且质量门禁（`check`）全绿后部署——坏代码进不了线上。
 
 ```bash
 pnpm --filter @rt/web dev      # 开发服务器
@@ -89,19 +90,25 @@ npm run test-translate              # 多向翻译（首次会下载模型）
 
 ## 模型
 
-同一套 ASR 模型（Silero VAD + SenseVoice int8）在所有平台运行，只是运行时不同（macOS 原生 N-API、iOS xcframework、网页单线程 WASM），首次运行时按 `@rt/core` 清单下载。
+识别默认用 SenseVoice（多语言，全平台可用），另有 Paraformer / ReazonSpeech / Parakeet 三个单语专用模型；本地翻译在 macOS 用 M2M-100（另可选更大的 1.2B 版），网页用 M2M-100，iOS 用 Apple 端上翻译。所有模型都在按需下载时按 `@rt/core` 注册表获取，运行时各不相同（macOS 原生 N-API、iOS xcframework、网页单线程 WASM）。
 
-| 模型 | 用途 | 大小 | 获取 |
-|---|---|---|---|
-| Silero VAD | 语音活动检测 | 约 0.6MB（网页，随应用同源）/ 约 2.2MB（macOS，下载） | 网页随应用同源分发；macOS 自动下载 |
-| SenseVoice (int8) | 多语言语音识别 | 约 230MB | 首次启动自动下载 |
-| M2M100-418M (int8) | 多语言翻译 | 约 630MB | 启用本地翻译时经下载页下载（macOS / 网页） |
+获取来源按端分：**macOS / iOS** 从本仓库的 GitHub Release（`models-v1` 资产，自托管）下载全部模型；**网页**因 GitHub Release 资产不发 CORS 头，改从上游 HuggingFace 下载（Silero VAD 在网页维持随应用同源分发）。
 
-iOS **不**下载 M2M100，改用 Apple 的端上翻译。繁體中文是把结果做脚本转换得到的——M2M100 / Apple 都不区分简/繁。
+| 模型 | 用途 | 平台 | 大小 | 获取 |
+|---|---|---|---|---|
+| Silero VAD | 语音端点检测（各识别模型共用） | 全平台 | 约 0.6MB | macOS / iOS 从 GitHub Release 下载；网页随应用同源分发 |
+| SenseVoice (int8) | 多语言识别（默认） | macOS / iOS / 网页 | 约 230MB | macOS / iOS：GitHub Release；网页：HuggingFace |
+| Paraformer-zh (int8) | 中文识别 | macOS / 网页 | 约 220MB | 同上（按端分源） |
+| ReazonSpeech-ja | 日语识别 | macOS / 网页 | 约 160MB | 同上 |
+| Parakeet-en (int8) | 英语识别 | macOS / 网页 | 约 630MB | 同上 |
+| M2M100-418M (q8) | 多语言翻译（默认） | macOS / 网页 | 约 640MB | 同上 |
+| M2M100-1.2B (q8) | 多语言翻译（更高质量） | macOS | 约 1.5GB | GitHub Release（自行转换并自托管，无上游镜像） |
+
+iOS **不**下载翻译模型，改用 Apple 的端上翻译。中文译文统一做简体归一化（M2M100 / Apple 都不区分简繁字形）。
 
 ## 技术架构
 
-三个平台共享 `@rt/core` + `@rt/ui`，差别只在 `AppBridge` 实现。同一套 ASR 模型在各端按各自运行时跑——**macOS** = sherpa-onnx-node（原生 N-API），**iOS** = sherpa-onnx xcframework（原生 C++），**网页** = sherpa-onnx 单线程 WASM。本地翻译也按平台分——**macOS / 网页** = M2M100（Transformers.js，onnxruntime-node / onnxruntime-web），**iOS** = Apple Translation 框架。云端（任意 OpenAI 兼容端点）三端都可用。
+三个平台共享 `@rt/core` + `@rt/ui`，差别只在 `AppBridge` 实现。同一套 ASR 模型在各端按各自运行时跑——**macOS** = sherpa-onnx-node（原生 N-API），**iOS** = sherpa-onnx xcframework（原生 C++），**网页** = sherpa-onnx 单线程 WASM。本地翻译也按平台分——**macOS / 网页** = M2M100（Transformers.js，onnxruntime-node / onnxruntime-web；macOS 另可选 1.2B 版），**iOS** = Apple Translation 框架。云端（任意 OpenAI 兼容端点）三端都可用。
 
 下图是 macOS 的进程划分（iOS 与网页不同——分别是原生插件 / WASM Worker，不是 Electron 进程）：
 
@@ -114,9 +121,9 @@ flowchart LR
   subgraph MAIN["主进程"]
     HUB["转发 / 调度"]
   end
-  subgraph UTIL["utilityProcess × 2（隔离）"]
-    ASR["ASR：Silero VAD → SenseVoice<br/>(zh / en / ja / ko / yue)<br/>说话中→部分识别 · 段结束→最终结果"]
-    TRANS["翻译：M2M100<br/>· 或云端（OpenAI 兼容）"]
+  subgraph UTIL["隔离子进程"]
+    ASR["ASR（utilityProcess）：Silero VAD → SenseVoice<br/>(zh / en / ja / ko / yue)<br/>说话中→部分识别 · 段结束→最终结果"]
+    TRANS["翻译（纯 Node 子进程）：M2M100<br/>· 或云端（OpenAI 兼容）"]
   end
   MIC -- "IPC：音频" --> HUB
   HUB -- 音频 --> ASR
@@ -126,6 +133,6 @@ flowchart LR
   HUB -- "IPC：结果" --> UI
 ```
 
-在 macOS 上，ASR 与翻译各自跑在独立的 Electron `utilityProcess`：重推理不阻塞 UI，原生崩溃或超大内存分配也只影响该子进程，不会拖垮整个应用。网页上对应的隔离是每个任务一个 Web Worker；iOS 上则由原生插件承担。
+在 macOS 上，ASR 跑在独立的 Electron `utilityProcess`，翻译则跑在独立的纯 Node 子进程（`child_process.fork` + `ELECTRON_RUN_AS_NODE`，脱离 Chromium 的内存分配器以支撑 1.5GB 级模型推理）：重推理不阻塞 UI，原生崩溃或超大内存分配也只影响该子进程，不会拖垮整个应用。网页上对应的隔离是每个任务一个 Web Worker；iOS 上则由原生插件承担。
 
 转写引擎为 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)（ONNX Runtime）；macOS 与网页的本地翻译用 [Transformers.js](https://github.com/huggingface/transformers.js) 跑 Meta M2M100-418M（MIT）。翻译封装在 `@rt/core` 的 `Translator` 接口之后（每个模型一份 spec）——换更强的本地模型、Apple 框架或云 API，只是新增一个实现。
