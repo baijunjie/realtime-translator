@@ -1,7 +1,9 @@
-// 翻译子进程（Electron utilityProcess，完整 Node）。
+// 翻译子进程（ELECTRON_RUN_AS_NODE 的纯 Node 进程，经 child_process.fork 启动）。
 // 把翻译模型(transformers.js + onnxruntime-node)隔离到独立进程：原生崩溃、超大内存
-// 分配（如 NLLB 反量化的 ~1GB 分配在主进程会被 Chromium 分配器直接 abort）都被隔离在
-// 这里，翻译进程即便挂掉也不连累主窗口，主进程会在下次翻译时自动重启它。
+// 分配都被隔离在这里，翻译进程即便挂掉也不连累主窗口，主进程会在下次翻译时自动重启它。
+// 必须脱离 Electron 的 utilityProcess：后者挂着 Chromium 的内存分配器，翻译模型推理时
+// 的超大分配（约 870MB 及以上）会触发分配器对巨型分配的 abort（EXC_BREAKPOINT）而崩溃；
+// 纯 Node 用系统 malloc 无此限制，故这里以标准 Node IPC（process.send / process.on）通信。
 import { createTranslator, type Translator } from './translator';
 import type {
   MainToTranslate,
@@ -10,14 +12,12 @@ import type {
   CloudTranslationConfig,
 } from '../../shared/types';
 
-const parentPort = process.parentPort;
-
 let translator: Translator | null = null;
 let ready: Promise<void> | null = null;
 let config: { engine: TranslationEngine; cloud: CloudTranslationConfig; cacheDir: string } | null = null;
 
 function post(msg: TranslateToMain): void {
-  parentPort.postMessage(msg);
+  process.send!(msg);
 }
 
 function build(): Translator {
@@ -59,8 +59,7 @@ function ensure(): Promise<Translator> {
   return ready.then(() => instance);
 }
 
-parentPort.on('message', (e: { data: MainToTranslate }) => {
-  const msg = e.data;
+process.on('message', (msg: MainToTranslate) => {
   switch (msg.type) {
     case 'configure':
       // 配置变更：丢弃旧翻译器，下次按新配置重建

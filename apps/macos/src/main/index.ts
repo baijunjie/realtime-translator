@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import { fork, type ChildProcess } from 'node:child_process';
 import {
   app,
   BrowserWindow,
@@ -67,11 +68,13 @@ let sessionActive = false;
 // 子进程内部的段序号随进程生命周期从 0 计，直接透传会与既有行冲突、译文回填错行。
 let nextLineId = 0;
 
-// 翻译跑在独立的 utilityProcess 子进程：隔离原生崩溃与超大内存分配（如 NLLB 反量化
-// 在主进程会被 Chromium 分配器 abort），翻译进程挂掉也不连累主窗口，仅丢一次翻译。
+// 翻译跑在独立的纯 Node 子进程（child_process.fork + ELECTRON_RUN_AS_NODE）：隔离原生
+// 崩溃与超大内存分配，翻译进程挂掉也不连累主窗口，仅丢一次翻译。必须脱离 utilityProcess
+// ——后者挂着 Chromium 分配器，翻译模型推理的超大分配（约 870MB 及以上）会被其对巨型分配的
+// abort 直接杀死；纯 Node 用系统 malloc 无此限制。ASR 子进程无此问题，仍用 utilityProcess。
 // 句柄携带该进程专属的在途请求表，按进程隔离：进程退出时只 reject 发往它的请求。
 interface TranslateChild {
-  proc: UtilityProcess;
+  proc: ChildProcess;
   // 在途翻译请求：行 id → Promise 句柄。子进程 result/error 消息按 id 关联回 Promise，
   // 把消息协议封装成 async 引擎调用供 core 编排使用；进程退出时只 reject 发往它的请求，防悬挂。
   pending: Map<number, { resolve: (text: string) => void; reject: (e: Error) => void }>;
@@ -172,7 +175,7 @@ function requestTranslate(req: SegmentTranslateRequest): Promise<string> {
   const child = ensureTranslateChild();
   return new Promise<string>((resolve, reject) => {
     child.pending.set(req.id, { resolve, reject });
-    child.proc.postMessage({
+    child.proc.send({
       type: 'translate',
       id: req.id,
       text: req.text,
@@ -184,7 +187,18 @@ function requestTranslate(req: SegmentTranslateRequest): Promise<string> {
 
 /** 启动翻译子进程并按当前设置初始化 */
 function startTranslateChild(): TranslateChild {
-  const proc = utilityProcess.fork(translateWorkerPath);
+  // 以纯 Node 运行翻译子进程：fork 用 process.execPath（Electron 二进制），配合
+  // ELECTRON_RUN_AS_NODE=1 使其以 Node 运行时启动、脱离 Chromium 分配器。env 需先展开
+  // process.env（fork 传 env 会整体替换而非合并），再覆盖该标志。
+  // 打包态：纯 Node 无 asar 补丁，读不了 app.asar 内的文件，故 fork 目标改指 app.asar.unpacked
+  // （out/main 已在 asarUnpack 之列）。dev 态产物在真实文件系统，无需替换。
+  const workerPath = app.isPackaged
+    ? translateWorkerPath.replace('app.asar', 'app.asar.unpacked')
+    : translateWorkerPath;
+  const proc = fork(workerPath, [], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+  });
   const pending: TranslateChild['pending'] = new Map();
   const handle: TranslateChild = { proc, pending };
   translateChild = handle;
@@ -199,7 +213,7 @@ function startTranslateChild(): TranslateChild {
       pending.delete(m.id);
     }
   });
-  proc.on('exit', (code) => {
+  proc.on('exit', (code, signal) => {
     // 仅当全局引用仍指向本进程时才清空：reconfigure 已 fork 新进程时，旧进程的异步 exit
     // 不能误清新引用（否则新进程成孤儿、发往它的在途翻译被误判失败）。
     const isCurrent = translateChild === handle;
@@ -208,16 +222,19 @@ function startTranslateChild(): TranslateChild {
     }
     // 只 reject 发往本进程的在途请求（core 编排据此结束对应行的等待动画），不波及其它进程。
     for (const p of pending.values()) {
-      p.reject(new Error(`翻译进程退出 (${code})`));
+      p.reject(new Error(`翻译进程退出 (${signal ?? code})`));
     }
     pending.clear();
-    if (code !== 0) {
+    // 仅在「引用仍指向本进程」（即非主动 kill 重建）且非正常退出时报错：reconfigure/删除模型/
+    // 关窗等主动 kill 已同步置空引用，isCurrent 为假，不误报；被信号杀死的崩溃 code 为 null、
+    // signal 携带信号名，故以 code!==0 判定异常退出（兼容 null）。
+    if (isCurrent && code !== 0) {
       // 翻译进程异常退出（如模型内存过大崩溃）：主进程存活，提示失败，下次翻译自动重启
-      sendToRenderer('translation:status', { state: 'error', error: `翻译进程异常退出 (${code})` });
+      sendToRenderer('translation:status', { state: 'error', error: `翻译进程异常退出 (${signal ?? code})` });
     }
   });
   const t = loadSettings().translation;
-  proc.postMessage({
+  proc.send({
     type: 'configure',
     engine: t.engine,
     cloud: t.cloud,
@@ -572,7 +589,7 @@ ipcMain.handle('settings:save', (_event, next: AppSettings): AppSettings => {
   if (saved.translation.enabled && (engineChanged || enabledTurnedOn)) {
     const canPreheat = saved.translation.engine === 'cloud' || translationModelCached();
     if (canPreheat) {
-      ensureTranslateChild().proc.postMessage({ type: 'preheat' });
+      ensureTranslateChild().proc.send({ type: 'preheat' });
     }
   }
   // 返回收敛后的设置（与 settings:get 一致），保证 UI 拿到本机实际生效的音源。
@@ -620,7 +637,7 @@ app.whenReady().then(() => {
   // 未缓存则不在此下载（首次下载交给翻译模型下载页）。cloud 引擎的预热仍只在设置保存时触发。
   const t = loadSettings().translation;
   if (t.enabled && t.engine !== 'cloud' && translationModelCached()) {
-    ensureTranslateChild().proc.postMessage({ type: 'preheat' });
+    ensureTranslateChild().proc.send({ type: 'preheat' });
   }
 });
 

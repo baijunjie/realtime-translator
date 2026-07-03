@@ -11,12 +11,32 @@ files:
   - "!**/node_modules/onnxruntime-node/bin/napi-v6/linux/**"
   - "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/**"
   - "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin/x64/**"
-# 原生模块带 .node/.dylib，不能从 asar 内加载，必须解包到 app.asar.unpacked
+# 解包到 app.asar.unpacked 的两类文件：
+# 1) 原生模块（.node/.dylib）本就不能从 asar 内加载；
+# 2) 翻译子进程以 ELECTRON_RUN_AS_NODE 的纯 Node 运行，无 asar 补丁，读不了 app.asar 内的
+#    任何文件——它 fork 的入口（out/main）及其运行时 require 的整棵依赖树（含纯 JS 依赖）都必须解包。
+#    实测闭包（hook Module._load 真跑一次翻译）：@huggingface/transformers、chinese-conv、
+#    onnxruntime-node、onnxruntime-common、sharp、@img/*、detect-libc、semver；
+#    color 系为 sharp 部分发行版 require 的纯 JS 依赖，按「宁可多解包不可漏」保留。
 asarUnpack:
   - "**/node_modules/sherpa-onnx-node/**"
   - "**/node_modules/onnxruntime-node/**"
   - "**/node_modules/sharp/**"
   - "**/node_modules/@img/**"
+  # 翻译子进程 fork 的入口 chunk（纯 Node 无法从 asar 读取）
+  - "out/main/**"
+  # 翻译链路运行时依赖闭包
+  - "**/node_modules/@huggingface/**"
+  - "**/node_modules/onnxruntime-common/**"
+  - "**/node_modules/chinese-conv/**"
+  - "**/node_modules/detect-libc/**"
+  - "**/node_modules/semver/**"
+  - "**/node_modules/color/**"
+  - "**/node_modules/color-convert/**"
+  - "**/node_modules/color-string/**"
+  - "**/node_modules/color-name/**"
+  - "**/node_modules/simple-swizzle/**"
+  - "**/node_modules/is-arrayish/**"
 # 原生模块是 N-API 预编译产物（ABI 稳定），无需也不应重新编译
 npmRebuild: false
 mac:
