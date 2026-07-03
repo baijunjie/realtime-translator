@@ -89,6 +89,20 @@ const errorDisplay = computed(() =>
 // setup 时 bridge 已由 mountApp 注入，可同步判定。
 const canForceUpdate = typeof bridge().forceUpdateApp === 'function';
 
+// 顶栏内联的模型加载状态：识别/翻译的加载收敛到同一处（不插入内容行、零布局位移）。
+// 多项同时加载时顶栏只显示合并文案，具体项放 tooltip。
+const loadingItems = computed<string[]>(() => {
+  const items: string[] = [];
+  if (modelLoading.value) items.push(t('status.loadingModel'));
+  if (translateOn.value && translationLoading.value) {
+    items.push(translationDownloading.value ? t('status.transDownloading') : t('status.transLoading'));
+  }
+  return items;
+});
+const loadingSummary = computed(() =>
+  loadingItems.value.length > 1 ? t('status.preparing') : (loadingItems.value[0] ?? ''),
+);
+
 // 音源开关：仅当桥接声明支持系统音频时才显示（macOS）。切换即持久化。
 const supportsSystemAudio = bridge().audioSources?.includes('system') ?? false;
 const audioSourceTitle = computed(() =>
@@ -256,6 +270,24 @@ function openMicSettings(): void {
 
       <div class="flex-1" />
 
+      <!-- 模型加载状态：顶栏内联，窄屏只留转圈图标；hover 看具体加载项 -->
+      <n-tooltip v-if="loadingItems.length">
+        <template #trigger>
+          <div class="flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400">
+            <LoaderCircle :size="14" class="animate-spin" />
+            <span class="max-sm:hidden">{{ loadingSummary }}</span>
+          </div>
+        </template>
+        <div v-for="item in loadingItems" :key="item">{{ item }}</div>
+      </n-tooltip>
+      <!-- 翻译引擎级错误：同一位置收敛为红色警示图标（行级失败仍在对应行内展示） -->
+      <n-tooltip v-else-if="translateOn && translationError">
+        <template #trigger>
+          <TriangleAlert :size="14" class="text-red-500" />
+        </template>
+        {{ t('status.transFailed') }}
+      </n-tooltip>
+
       <!-- 窄屏隐藏，改用下方「...」菜单与底部圆形录音按钮 -->
       <div class="flex items-center gap-3.5 max-sm:hidden">
         <!-- NDropdown 无 disabled 属性：无内容时直接渲染禁用按钮，避免空状态仍能弹出菜单 -->
@@ -340,31 +372,6 @@ function openMicSettings(): void {
         </n-dropdown>
       </div>
     </header>
-
-    <!-- ASR 模型加载中：转圈提示并禁用录音（预热无进度信号，与「准备翻译」一致的轻量样式） -->
-    <div
-      v-if="preparing"
-      class="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 text-xs text-neutral-500 dark:border-[#3a3b44] dark:text-neutral-400"
-    >
-      <LoaderCircle :size="14" class="animate-spin" />
-      <span>{{ t('status.loadingModel') }}</span>
-    </div>
-
-    <!-- 翻译模型状态条（与识别模型同款样式）：加载/下载不挡录音，仅提示。 -->
-    <div
-      v-if="translateOn && translationLoading"
-      class="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 text-xs text-neutral-500 dark:border-[#3a3b44] dark:text-neutral-400"
-    >
-      <LoaderCircle :size="14" class="animate-spin" />
-      <span>{{ translationDownloading ? t('status.transDownloading') : t('status.transLoading') }}</span>
-    </div>
-    <div
-      v-else-if="translateOn && translationError"
-      class="flex items-center gap-2 border-b border-neutral-200 px-5 py-3 text-xs text-red-500 dark:border-[#3a3b44]"
-    >
-      <TriangleAlert :size="14" />
-      <span>{{ t('status.transFailed') }}</span>
-    </div>
 
     <transcript-list
       :lines="lines"

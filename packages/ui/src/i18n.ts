@@ -119,6 +119,7 @@ const messages = {
     },
     status: {
       loadingModel: 'Loading speech model…',
+      preparing: 'Preparing models…',
       transDownloading: 'Downloading translation model…',
       transFailed: 'Failed to load translation model',
       transFailedLine: 'Translation failed',
@@ -241,6 +242,7 @@ const messages = {
     },
     status: {
       loadingModel: '音声認識モデルを読み込み中…',
+      preparing: 'モデルを準備中…',
       transDownloading: '翻訳モデルをダウンロード中…',
       transFailed: '翻訳モデルの読み込みに失敗しました',
       transFailedLine: '翻訳に失敗しました',
@@ -361,6 +363,7 @@ const messages = {
     },
     status: {
       loadingModel: '음성 인식 모델 로딩 중…',
+      preparing: '모델 준비 중…',
       transDownloading: '번역 모델 다운로드 중…',
       transFailed: '번역 모델 로딩 실패',
       transFailedLine: '번역 실패',
@@ -481,6 +484,7 @@ const messages = {
     },
     status: {
       loadingModel: '识别模型加载中…',
+      preparing: '模型准备中…',
       transDownloading: '翻译模型下载中…',
       transFailed: '翻译模型加载失败',
       transFailedLine: '翻译失败',
