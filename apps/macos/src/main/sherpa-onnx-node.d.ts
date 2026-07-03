@@ -37,8 +37,15 @@ declare module 'sherpa-onnx-node' {
   export interface OfflineRecognizerConfig {
     featConfig?: { sampleRate: number; featureDim: number };
     modelConfig: {
-      senseVoice?: { model: string; useInverseTextNormalization?: number };
+      // SenseVoice：language 合法取值 auto/zh/en/ja/ko/yue（或空串=auto），由原生校验。
+      senseVoice?: { model: string; language?: string; useInverseTextNormalization?: number };
+      // Paraformer：单一模型文件。
+      paraformer?: { model: string };
+      // Transducer：encoder/decoder/joiner 三件套（zipformer / NeMo 通用）。
+      transducer?: { encoder: string; decoder: string; joiner: string };
       tokens: string;
+      // 模型子类型：NeMo transducer 需设为 'nemo_transducer'；标准 zipformer 由原生自动识别，不设。
+      modelType?: string;
       numThreads?: number;
       debug?: number;
     };

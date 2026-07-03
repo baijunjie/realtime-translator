@@ -1,15 +1,33 @@
 import path from 'node:path';
-import { app, BrowserWindow, ipcMain, shell, systemPreferences, utilityProcess, type UtilityProcess } from 'electron';
+import fs from 'node:fs';
+import {
+  app,
+  BrowserWindow,
+  desktopCapturer,
+  ipcMain,
+  session,
+  shell,
+  systemPreferences,
+  utilityProcess,
+  type UtilityProcess,
+} from 'electron';
 import {
   M2M100_SPEC,
   translateFinalizedSegment,
   CloudTranslator,
+  ASR_MODELS,
+  getAsrModel,
+  requiredAsrFiles,
   type SegmentTranslateRequest,
+  type AsrLang,
+  type ModelInfo,
+  type ModelKind,
 } from '@rt/core';
 import { localModelCached } from './translation/model-cache';
 import { loadSettings, saveSettings } from './settings';
 import { asrModelsReady, downloadAsrModels } from './model-downloader';
 import { listArchives, getArchive, saveArchive, deleteArchive } from './archives';
+import { systemAudioSupported } from '../shared/audio-source';
 import asrWorkerPath from './asr-process?modulePath';
 import translateWorkerPath from './translation/translate-process?modulePath';
 import type {
@@ -36,6 +54,8 @@ let win: BrowserWindow | null = null;
 // ASR 识别跑在独立的 utilityProcess 子进程，主进程只转发音频、不做推理
 let asrChild: UtilityProcess | null = null;
 let asrReady: Promise<void> | null = null;
+// 当前存活的 ASR 子进程装载的模型/语言配置：设置保存时据此判断是否需要按新配置重建。
+let asrChildConfig: { modelId: string; language: AsrLang } | null = null;
 // 是否处于录音会话（start 进入 running 后为真、stop/子进程退出后为假）。
 // prewarm 冷启动完成时据此判断：会话已由 start 接管（running）则不再发 stopped 覆盖。
 let sessionActive = false;
@@ -66,6 +86,47 @@ let pendingModelDownload: {
 // 本地翻译模型是否已完整缓存：据此回答下载页「是否已缓存」，并在设置保存时门控本地模型的自动预热。
 function translationModelCached(): boolean {
   return localModelCached(TRANSLATION_CACHE_DIR, M2M100_SPEC);
+}
+
+/** 本机是否支持系统音频采集（macOS 14.2+）。与 preload 的音源判定共用同一逻辑。 */
+function systemAudioAvailable(): boolean {
+  return process.platform === 'darwin' && systemAudioSupported(process.getSystemVersion());
+}
+
+/**
+ * 对外暴露的设置：系统版本不支持系统音频时把 audioSource 收敛为 'mic'，
+ * 与 preload 上报的 audioSources 保持一致（避免 UI 拿到本机不可用的 'system'）。
+ */
+function effectiveSettings(): AppSettings {
+  const s = loadSettings();
+  if (s.audioSource === 'system' && !systemAudioAvailable()) {
+    return { ...s, audioSource: 'mic' };
+  }
+  return s;
+}
+
+/** 递归统计目录实际占用字节（目录不存在返回 0）。 */
+function dirSize(dir: string): number {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      total += dirSize(p);
+    } else {
+      try {
+        total += fs.statSync(p).size;
+      } catch {
+        // 统计期文件被删/无权限：忽略该文件
+      }
+    }
+  }
+  return total;
 }
 
 // 应用图标：仅开发时手动设置（dev 下 Dock 默认显示 Electron 图标）；
@@ -206,6 +267,9 @@ function translateSegment(segment: SegmentPayload): void {
 function startAsrChild(): Promise<void> {
   const child = utilityProcess.fork(asrWorkerPath);
   asrChild = child;
+  // 按当前设置装载模型/语言，并记录本子进程所用配置（设置变更时据此判断是否需重建）。
+  const asr = loadSettings().asr;
+  asrChildConfig = { modelId: asr.model, language: asr.language };
 
   return new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -237,19 +301,33 @@ function startAsrChild(): Promise<void> {
       }
     });
     child.on('exit', (code) => {
-      asrChild = null;
-      asrReady = null;
-      sessionActive = false;
-      if (code !== 0) {
-        sendToRenderer('pipeline:status', { state: 'error', error: `识别进程异常退出 (${code})`, code: 'asr-crashed' });
-        if (!settled) {
-          settled = true;
-          reject(new Error(`识别进程退出 ${code}`));
+      // 仅当全局引用仍指向本进程时才清空并上报：设置变更/删除模型主动 kill 时已同步置空引用，
+      // 其异步 exit 不应误报「识别进程异常退出」，也不应清掉随后新建的子进程引用。
+      const isCurrent = asrChild === child;
+      if (isCurrent) {
+        asrChild = null;
+        asrReady = null;
+        asrChildConfig = null;
+        sessionActive = false;
+        if (code !== 0) {
+          sendToRenderer('pipeline:status', { state: 'error', error: `识别进程异常退出 (${code})`, code: 'asr-crashed' });
         }
       }
+      if (code !== 0 && !settled) {
+        settled = true;
+        reject(new Error(`识别进程退出 ${code}`));
+      }
     });
-    child.postMessage({ type: 'init', modelsDir: MODELS_DIR });
+    child.postMessage({ type: 'init', modelsDir: MODELS_DIR, modelId: asr.model, language: asr.language });
   });
+}
+
+/** 让当前 ASR 子进程按新配置重建：同步置空引用，下次 start/prewarm 时以最新设置重新 fork。 */
+function reconfigureAsr(): void {
+  asrChild?.kill();
+  asrChild = null;
+  asrReady = null;
+  asrChildConfig = null;
 }
 
 /** 确保 ASR 子进程已就绪（懒启动 + 复用） */
@@ -261,7 +339,9 @@ function ensureAsr(): Promise<void> {
 }
 
 ipcMain.handle('pipeline:start', async (): Promise<StartResult> => {
-  if (process.platform === 'darwin') {
+  // 仅麦克风音源需申请麦克风权限；系统音频音源不触碰麦克风权限
+  // （系统音频的录制授权在渲染层 getDisplayMedia 时由系统弹出，见 mac-bridge）。
+  if (effectiveSettings().audioSource === 'mic' && process.platform === 'darwin') {
     const granted = await systemPreferences.askForMediaAccess('microphone');
     if (!granted) {
       return { ok: false, error: '未获得麦克风权限，请在系统设置中授权', code: 'mic-permission' };
@@ -291,7 +371,7 @@ ipcMain.handle('pipeline:start', async (): Promise<StartResult> => {
 // pipeline:status 的 stopped 终态收尾解禁。与并发的 pipeline:start 共用 ensureAsr 单飞天然合流。
 // 冷启动失败时子进程的 error 状态会照常上报（用户未操作也能看到提示），随后仍以 stopped 收尾。
 ipcMain.on('pipeline:prewarm', () => {
-  if (!asrModelsReady(MODELS_DIR)) {
+  if (!asrModelsReady(MODELS_DIR, loadSettings().asr.model)) {
     sendToRenderer('pipeline:status', { state: 'stopped' });
     return;
   }
@@ -320,16 +400,83 @@ ipcMain.on('mic:open-settings', () => {
   }
 });
 
-ipcMain.handle('setup:get-status', (): SetupStatus => ({ asrReady: asrModelsReady(MODELS_DIR) }));
+ipcMain.handle('setup:get-status', (_event, modelId: string): SetupStatus => ({
+  asrReady: asrModelsReady(MODELS_DIR, modelId),
+}));
 
-ipcMain.handle('setup:download-asr', async (): Promise<{ ok: boolean; error?: string }> => {
-  try {
-    await downloadAsrModels(MODELS_DIR, (p) => sendToRenderer('setup:progress', p));
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: (err as Error).message };
+ipcMain.handle(
+  'setup:download-asr',
+  async (_event, modelId: string): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      await downloadAsrModels(MODELS_DIR, modelId, (p) => sendToRenderer('setup:progress', p));
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
   }
+);
+
+// 模型管理页：列出各模型（ASR + 翻译）的占用与状态
+ipcMain.handle('models:list', (): ModelInfo[] => {
+  const settings = loadSettings();
+  const models: ModelInfo[] = [];
+  for (const spec of ASR_MODELS) {
+    if (!spec.platforms.includes('macos')) continue;
+    // sizeBytes 为该模型自身文件的实际字节和（不含公共依赖 VAD）
+    let sizeBytes = 0;
+    for (const f of spec.files) {
+      try {
+        sizeBytes += fs.statSync(path.join(MODELS_DIR, f.dir, f.filename)).size;
+      } catch {
+        // 未下载/缺文件：不计入
+      }
+    }
+    models.push({
+      kind: 'asr',
+      id: spec.id,
+      sizeBytes,
+      downloaded: requiredAsrFiles(spec.id).every((rel) => fs.existsSync(path.join(MODELS_DIR, rel))),
+      inUse: settings.asr.model === spec.id,
+    });
+  }
+  models.push({
+    kind: 'translation',
+    id: 'm2m100',
+    sizeBytes: dirSize(TRANSLATION_CACHE_DIR),
+    downloaded: translationModelCached(),
+    inUse: settings.translation.engine === 'm2m100',
+  });
+  return models;
 });
+
+// 模型管理页：删除某个已下载模型（录音会话中拒绝）
+ipcMain.handle(
+  'models:delete',
+  (_event, kind: ModelKind, id: string): { ok: boolean; error?: string } => {
+    if (sessionActive) {
+      return { ok: false, error: '录音进行中，无法删除模型' };
+    }
+    try {
+      if (kind === 'asr') {
+        const spec = getAsrModel(id);
+        if (!spec) return { ok: false, error: '未知的识别模型' };
+        // 删除该模型目录（公共依赖 VAD 位于 models 根目录，不受影响）
+        fs.rmSync(path.join(MODELS_DIR, spec.dir), { recursive: true, force: true });
+        // 删的是当前子进程在用的模型：kill，下次 start/prewarm 按新设置重建
+        if (asrChildConfig?.modelId === id) {
+          reconfigureAsr();
+        }
+      } else {
+        // 翻译模型：先 kill 翻译子进程释放文件句柄，再删缓存目录
+        reconfigureTranslate();
+        fs.rmSync(TRANSLATION_CACHE_DIR, { recursive: true, force: true });
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+);
 
 // 下载页：本地翻译模型是否已缓存（无需下载则 ready:true，可直接进入主界面）
 ipcMain.handle('translation:setup-status', (): { ready: boolean } => ({
@@ -376,7 +523,7 @@ ipcMain.handle('archive:save', (_event, name: string, lines: ArchiveLine[]) =>
 );
 ipcMain.handle('archive:delete', (_event, id: string) => deleteArchive(id));
 
-ipcMain.handle('settings:get', (): AppSettings => loadSettings());
+ipcMain.handle('settings:get', (): AppSettings => effectiveSettings());
 
 ipcMain.handle('settings:save', (_event, next: AppSettings): AppSettings => {
   const prev = loadSettings().translation;
@@ -396,6 +543,14 @@ ipcMain.handle('settings:save', (_event, next: AppSettings): AppSettings => {
   if (engineChanged) {
     reconfigureTranslate();
   }
+  // 识别模型/语言变了：kill 当前 ASR 子进程，下次 start/prewarm 按新配置重建
+  // （与翻译器的 reconfigure 同风格；比对存活子进程实际装载的配置，无子进程时无需处理）。
+  if (
+    asrChildConfig &&
+    (asrChildConfig.modelId !== saved.asr.model || asrChildConfig.language !== saved.asr.language)
+  ) {
+    reconfigureAsr();
+  }
   // 保存后自动预热（降低首句翻译延迟）：
   // - cloud：无本地模型，直接预热（发起云端引擎的懒初始化，开销小）；
   // - 本地：仅当模型已缓存时预热（把磁盘模型载入内存）；未缓存则不在此下载，
@@ -406,7 +561,8 @@ ipcMain.handle('settings:save', (_event, next: AppSettings): AppSettings => {
       ensureTranslateChild().proc.postMessage({ type: 'preheat' });
     }
   }
-  return saved;
+  // 返回收敛后的设置（与 settings:get 一致），保证 UI 拿到本机实际生效的音源。
+  return effectiveSettings();
 });
 
 // 云端配置连通性测试：主进程用 Node fetch 打一次最小翻译请求（无浏览器 CORS 限制，与实际云翻译
@@ -435,6 +591,20 @@ app.whenReady().then(() => {
   if (!app.isPackaged && process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(APP_ICON);
   }
+  // 系统音频采集：渲染层 getDisplayMedia 走到这里。取主屏作为 video 源（渲染层随即停掉 video 轨，
+  // 只用 audio），audio:'loopback' 采集系统播放的声音。不使用系统选择器（useSystemPicker）。
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    desktopCapturer
+      .getSources({ types: ['screen'] })
+      .then((sources) => {
+        if (sources[0]) {
+          callback({ video: sources[0], audio: 'loopback' });
+        } else {
+          callback({}); // 无屏幕源：拒绝，渲染层 getDisplayMedia 随之 reject
+        }
+      })
+      .catch(() => callback({}));
+  });
   createWindow();
   // 启动即按「翻译已开 + 本地引擎 + 模型已缓存」预热本地翻译模型，降低首句翻译延迟；
   // 未缓存则不在此下载（首次下载交给翻译模型下载页）。cloud 引擎的预热仍只在设置保存时触发。

@@ -30,9 +30,47 @@ let vad = null;
 let recognizer = null;
 let pipeline = null;
 let frameQueue = []; // init 完成前先暂存帧
+// 当前 recognizer 所用的识别语言（'auto' / zh / en / ja / ko）。语言变化时据此判断是否需重建。
+let currentLanguage = 'auto';
 
 function post(msg) {
   self.postMessage(msg);
+}
+
+/**
+ * 按识别语言建 SenseVoice 离线识别器（tokens.txt 与 model.int8.onnx 已在 WASM FS，扁平名）。
+ * language 透传给原生：'auto' 与 zh/en/ja/ko 均为 SenseVoice 合法取值（原生校验）。
+ */
+function buildRecognizer(language) {
+  return new self.OfflineRecognizer(
+    {
+      featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
+      modelConfig: {
+        senseVoice: {
+          model: './model.int8.onnx',
+          language: language || 'auto',
+          useInverseTextNormalization: 1,
+        },
+        tokens: './tokens.txt',
+        numThreads: 1,
+        debug: 0,
+      },
+    },
+    self.Module,
+  );
+}
+
+/** 预热一次当前 recognizer（吞掉首次/重建后的构图开销，避免首段卡顿）。 */
+function warmupRecognizer() {
+  try {
+    const stream = recognizer.createStream();
+    stream.acceptWaveform(SAMPLE_RATE, new Float32Array(SAMPLE_RATE));
+    recognizer.decode(stream);
+    recognizer.getResult(stream);
+    stream.free();
+  } catch {
+    /* ignore warmup error */
+  }
 }
 
 /**
@@ -101,24 +139,12 @@ async function handleInit(msg) {
       bufferSizeInSeconds: 120,
     });
 
-    // SenseVoice 离线识别。tokens.txt 与 model.int8.onnx 已写入 FS（扁平名）。
-    recognizer = new self.OfflineRecognizer(
-      {
-        featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
-        modelConfig: {
-          senseVoice: {
-            model: './model.int8.onnx',
-            useInverseTextNormalization: 1,
-          },
-          tokens: './tokens.txt',
-          numThreads: 1,
-          debug: 0,
-        },
-      },
-      self.Module,
-    );
+    // SenseVoice 离线识别。识别语言由 init 消息带入（缺省 'auto'）。
+    currentLanguage = msg.language || 'auto';
+    recognizer = buildRecognizer(currentLanguage);
 
     // core 管线对推理引擎的最小依赖（见 @rt/core AsrInferenceEngine）。
+    // transcribe 经模块级 recognizer 变量读取，reconfigure 重建后自动生效。
     const engine = {
       acceptVadWindow: (samples) => vad.acceptWaveform(samples),
       isSpeechDetected: () => vad.isDetected(),
@@ -138,12 +164,7 @@ async function handleInit(msg) {
       },
     };
 
-    // 预热一次（吞掉首次构图开销，避免首段卡顿）。
-    try {
-      engine.transcribe(new Float32Array(SAMPLE_RATE));
-    } catch {
-      /* ignore warmup error */
-    }
+    warmupRecognizer();
 
     pipeline = new TranscriptionPipeline(engine, {
       onSegment: (seg) => post({ type: 'segment', ...seg }),
@@ -191,6 +212,25 @@ self.onmessage = (ev) => {
     case 'reset':
       // 新一次录音会话：worker/模型复用，只重置计时基线与跨会话残留。
       pipeline?.reset();
+      break;
+    case 'reconfigure':
+      // 识别语言变化：模型字节仍在 WASM FS，仅重建 recognizer（免重下/重读 ~230MB）。
+      // 先建新的、成功后再释放旧的：buildRecognizer 抛错时旧 recognizer 仍完好可用。
+      // 失败经 'reconfigured' 的 error 字段回报（不发全局引擎错误——引擎其实仍在），
+      // 由主线程冷启动重建。
+      try {
+        const next = msg.language || 'auto';
+        if (next !== currentLanguage) {
+          const old = recognizer;
+          recognizer = buildRecognizer(next);
+          currentLanguage = next;
+          if (old) old.free();
+          warmupRecognizer();
+        }
+        post({ type: 'reconfigured' });
+      } catch (e) {
+        post({ type: 'reconfigured', error: e instanceof Error ? e.message : String(e) });
+      }
       break;
     case 'stop':
       try {

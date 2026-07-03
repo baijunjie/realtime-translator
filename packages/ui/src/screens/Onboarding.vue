@@ -13,6 +13,7 @@ const form = reactive<SettingsFormData>({
   nativeLang: current.nativeLang,
   fontSize: current.fontSize,
   theme: current.theme,
+  asr: { ...current.asr },
   // 三态：未开启翻译 → 无；开启 → 对应引擎（选了模型即视为开启，主页无独立开关）。
   engine: current.translation.enabled ? current.translation.engine : 'none',
   cloud: { ...current.translation.cloud },
@@ -31,6 +32,7 @@ async function start(): Promise<void> {
     nativeLang: form.nativeLang,
     fontSize: form.fontSize,
     theme: form.theme,
+    asr: { ...form.asr },
     translation: { ...current.translation, enabled, engine, cloud: { ...form.cloud } },
   });
   emit('done');

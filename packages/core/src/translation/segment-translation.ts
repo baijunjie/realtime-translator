@@ -16,7 +16,7 @@ export interface SegmentTranslateRequest {
   text: string;
   /** ASR 源语言短码（zh/en/ja/ko/yue） */
   source: string;
-  /** 目标母语 app 语言键（zh/zh-Hant/ja/en/ko）：能感知字形的引擎（本地模型映射 / 云端提示词）用它 */
+  /** 目标母语 app 语言键（zh/ja/en/ko）：能感知语言的引擎（本地模型映射 / 云端提示词）用它 */
   targetLang: string;
   /** 目标的模型短码（M2M100: zh/en/…）：只认短码的引擎（如 iOS 原生框架）用它 */
   targetCode: string;

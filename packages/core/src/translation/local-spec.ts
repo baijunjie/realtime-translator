@@ -1,12 +1,12 @@
 // 本地翻译模型的平台无关数据：模型规格（LocalModelSpec）、M2M100 规格与语言码映射，
-// 以及简繁脚本归一化（normalizeZh，基于 chinese-conv）。
+// 以及中文简体归一化（normalizeZh，基于 chinese-conv）。
 // 具体跑模型的 LocalTranslator 实现（依赖 onnxruntime-node）留在各端。
-import { sify, tify } from 'chinese-conv';
+import { sify } from 'chinese-conv';
 import type { LocalEngine } from '../types';
 
-/** 简繁脚本归一化：把中文文本转成简体或繁體。 */
-export function normalizeZh(text: string, script: 'simplified' | 'traditional'): string {
-  return script === 'traditional' ? tify(text) : sify(text);
+/** 中文简体归一化：模型输出偶带繁体字形，统一转简体（成本极低，值得保留）。 */
+export function normalizeZh(text: string): string {
+  return sify(text);
 }
 
 /** 某个 app 语言在该模型下如何处理：用哪个模型语言码 + 目标产出的脚本后处理 */
@@ -14,14 +14,14 @@ export interface LangEntry {
   /** 模型自己的语言码（M2M100: zh/en…；NLLB: zho_Hans/eng_Latn…） */
   code: string;
   /**
-   * 语言身份：判断「是否同一种语言」时用（忽略简繁字形）。zh 与 zh-Hant 同为 'zh'，
-   * 但 yue（粤语）与 zh 是不同语言，即便共用同一模型码 'zh' 也不能相互「同语言跳过」。
+   * 语言身份：判断「是否同一种语言」时用。用于区分共用同一模型码却实为不同语言者——
+   * yue（粤语）与 zh 都被 M2M100 归到码 'zh'，但不是同一语言，不能相互「同语言跳过」。
    * 缺省时回退到该项的 app 语言键（见 planTranslation）。
    */
   lang?: string;
   /**
-   * 作为目标语言时对译文的后处理。仅当模型本身不区分该脚本时才需要：
-   * 例如 M2M100 只有一个 'zh'，繁體目标靠脚本转换回退；NLLB 原生区分则无需。
+   * 作为目标语言时对译文的后处理：中文母语统一归一化为简体字形。
+   * 仅当母语需要该处理时才设（en/ja/ko 无需）。
    */
   toScript?: (text: string) => string;
 }
@@ -53,7 +53,7 @@ export function hasAllWeightFiles(spec: LocalModelSpec, cached: string[]): boole
   return spec.weightFiles.every((w) => cached.some((f) => f.includes(w) && f.includes('.onnx')));
 }
 
-// M2M100-418M（MIT，轻量）。不区分简/繁：繁體目标翻成中文后用脚本转换。
+// M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
 export const M2M100_SPEC: LocalModelSpec = {
   id: 'm2m100',
   modelId: 'Xenova/m2m100_418M',
@@ -63,9 +63,8 @@ export const M2M100_SPEC: LocalModelSpec = {
   approxDownloadBytes: 630_000_000, // q8 encoder+decoder+tokenizer 等合计约 630MB
   fallbackLang: 'en',
   langs: {
-    // zh / zh-Hant 同为中文（lang: 'zh'），只是简繁字形不同——彼此「同语言」，不经模型只做字形转换。
-    zh: { code: 'zh', lang: 'zh', toScript: (t) => normalizeZh(t, 'simplified') },
-    'zh-Hant': { code: 'zh', lang: 'zh', toScript: (t) => normalizeZh(t, 'traditional') },
+    // 中文母语：产出/原文一律归一化为简体（模型输出偶带繁体字形）。
+    zh: { code: 'zh', lang: 'zh', toScript: normalizeZh },
     en: { code: 'en' },
     ja: { code: 'ja' },
     ko: { code: 'ko' },
@@ -88,17 +87,17 @@ export type TranslationPlan =
       readonly kind: 'translate';
       /** 传给翻译引擎的目标模型短码（M2M100: zh/en/…）。 */
       readonly targetCode: string;
-      /** 母语 app 语言键（zh/zh-Hant/…）：云端可据此直接产出对应字形。 */
+      /** 母语 app 语言键（zh/ja/en/ko）：能感知语言的引擎（如云端提示词）用它。 */
       readonly targetLang: string;
-      /** 译文的字形后处理（简/繁）；无则不处理。 */
+      /** 译文的字形后处理（中文归一化为简体）；无则不处理。 */
       readonly toScript?: (text: string) => string;
     };
 
 /**
  * 决定源语言为 sourceLang 的一段文本翻成母语 nativeLang 时该如何处理。
- * 简繁差异（zh↔zh-Hant）只做轻量脚本转换、绝不经模型；源已是目标字形则等价于跳过。
+ * 中文母语只做轻量简体归一化、绝不经模型；源已是简体则等价于跳过。
  * @param sourceLang ASR 源语言短码（zh/en/ja/ko/yue）
- * @param nativeLang 母语 app 语言键（zh/zh-Hant/ja/en/ko）
+ * @param nativeLang 母语 app 语言键（zh/ja/en/ko）
  * @param text 源文本（用于判断字形转换后是否与原文一致）
  */
 export function planTranslation(
@@ -126,8 +125,8 @@ export function planTranslation(
     return { kind: 'skip' };
   }
 
-  // 同一语言但母语要求某种中文字形（简/繁）：对原文做脚本转换即可。
-  // 转换后与原文一致（源已是该字形，如简体语音→简体母语）时等价于跳过。
+  // 同一语言但母语要求简体字形：对原文做简体归一化即可。
+  // 转换后与原文一致（源已是简体）时等价于跳过。
   const converted = toScript(text);
   return converted === text ? { kind: 'skip' } : { kind: 'script', text: converted };
 }

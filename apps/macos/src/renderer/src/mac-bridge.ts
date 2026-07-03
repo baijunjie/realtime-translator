@@ -6,7 +6,7 @@
 // stopPipeline：先停采集（停轨 + 关闭 AudioContext），再停 ASR 子进程（api.stopPipeline）。
 // 其余方法全部直通 window.api。
 
-import type { AppBridge, StartResult } from '@rt/core';
+import type { AppBridge, StartResult, PipelineErrorCode } from '@rt/core';
 import type { ElectronApi } from '@shared/types';
 
 export function createMacBridge(api: ElectronApi): AppBridge {
@@ -15,20 +15,43 @@ export function createMacBridge(api: ElectronApi): AppBridge {
   // 重入守卫：正在进行的启动 promise，供并发/重复调用复用，避免双路采集与旧流引用被覆盖泄漏
   let starting: Promise<StartResult> | null = null;
 
-  // 启动采集链路：ASR 子进程就绪后再取麦克风并接上 AudioWorklet。任一步失败则释放已获取的
-  // stream/context 并回滚主进程已 start 的 pipeline，返回 { ok: false }（StartResult 契约），
-  // 避免 unhandled rejection、麦克风指示灯常亮与主进程状态残留。
+  /** 权限类采集失败（用户拒绝 / 未授权）。 */
+  function isPermissionError(err: unknown): boolean {
+    return err instanceof DOMException && err.name === 'NotAllowedError';
+  }
+
+  /**
+   * 采集系统音频（loopback）。video 必须请求一个 4×4 的微型轨——Electron 近期版本对 0×0
+   * video 的 loopback 会返回静音流，故取一个最小 video 轨规避；拿到流后立即停掉 video 轨，
+   * 只保留 audio 轨接入识别链路。
+   */
+  async function captureSystemAudio(): Promise<MediaStream> {
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      audio: true,
+      video: { width: 4, height: 4, frameRate: 1 },
+    });
+    stream.getVideoTracks().forEach((tr) => tr.stop());
+    return stream;
+  }
+
+  // 启动采集链路：ASR 子进程就绪后，按设置的音源取麦克风或系统音频，接上 AudioWorklet。
+  // 任一步失败则释放已获取的 stream/context 并回滚主进程已 start 的 pipeline，返回
+  // { ok: false }（StartResult 契约），避免 unhandled rejection、麦克风指示灯常亮与主进程状态残留。
   async function beginCapture(): Promise<StartResult> {
     const r = await api.startPipeline();
     if (!r.ok) return r;
+    const source = (await api.getSettings()).audioSource;
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+      mediaStream =
+        source === 'system'
+          ? await captureSystemAudio()
+          : await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
       audioContext = new AudioContext({ sampleRate: 16000 });
       await audioContext.audioWorklet.addModule('audio-worklet.js');
-      const source = audioContext.createMediaStreamSource(mediaStream);
+      const audioSource = audioContext.createMediaStreamSource(mediaStream);
       const capture = new AudioWorkletNode(audioContext, 'capture-processor');
       capture.port.onmessage = (e: MessageEvent<Float32Array>) => api.sendAudio(e.data);
-      source.connect(capture);
+      audioSource.connect(capture);
       return r;
     } catch (err) {
       mediaStream?.getTracks().forEach((tr) => tr.stop());
@@ -36,11 +59,21 @@ export function createMacBridge(api: ElectronApi): AppBridge {
       await audioContext?.close();
       audioContext = null;
       await api.stopPipeline();
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      const error = err instanceof Error ? err.message : String(err);
+      // 系统音频路径：区分「录制权限被拒」与「采集链路建立失败」；麦克风路径沿用原语义。
+      if (source === 'system') {
+        const code: PipelineErrorCode = isPermissionError(err)
+          ? 'system-audio-permission'
+          : 'audio-capture-failed';
+        return { ok: false, error, code };
+      }
+      return { ok: false, error };
     }
   }
 
   return {
+    platform: api.platform,
+    audioSources: api.audioSources,
     // 构建期注入的发布版本串；define 缺失的环境（如单测导入）下不暴露
     appVersion: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : undefined,
     async startPipeline() {
@@ -78,8 +111,10 @@ export function createMacBridge(api: ElectronApi): AppBridge {
     getSettings: () => api.getSettings(),
     saveSettings: (settings) => api.saveSettings(settings),
     testCloud: (cfg) => api.testCloud(cfg),
-    getSetupStatus: () => api.getSetupStatus(),
-    downloadAsrModels: () => api.downloadAsrModels(),
+    getSetupStatus: (modelId) => api.getSetupStatus(modelId),
+    downloadAsrModels: (modelId) => api.downloadAsrModels(modelId),
+    listModels: () => api.listModels(),
+    deleteModel: (kind, id) => api.deleteModel(kind, id),
     getTranslationSetupStatus: () => api.getTranslationSetupStatus(),
     downloadTranslationModel: () => api.downloadTranslationModel(),
     saveArchive: (name, lines) => api.saveArchive(name, lines),

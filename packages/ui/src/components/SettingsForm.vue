@@ -3,6 +3,7 @@ import type {
   UiLang,
   FontSize,
   ThemePref,
+  AsrSettings,
   CloudTranslationConfig,
   TranslationEngine,
 } from '@rt/core';
@@ -20,6 +21,8 @@ export interface SettingsFormData {
   nativeLang: UiLang;
   fontSize: FontSize;
   theme: ThemePref;
+  /** 识别语言 + 选用的 ASR 模型 */
+  asr: AsrSettings;
   engine: TranslationChoice;
   cloud: CloudTranslationConfig;
 }
@@ -29,8 +32,10 @@ export interface SettingsFormData {
 import { computed, ref, watch, watchEffect } from 'vue';
 import { NSelect, NInput, NAutoComplete, NFormItem, NAlert, NButton, type SelectOption } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
+import { UI_LANGS, asrModelsFor, DEFAULT_ASR_MODEL_ID, type AsrLang } from '@rt/core';
 import { bridge } from '../bridge';
 import { previewLocale, previewTheme, applyFontSize } from '../composables/useSettings';
+import { humanBytes } from '../utils/bytes';
 
 const { t } = useI18n();
 // 父组件持有 reactive 表单对象，子组件直接通过 v-model 修改其字段
@@ -115,14 +120,39 @@ watchEffect(() => {
   saveable.value = cloudOk.value && (!props.requireDirty || dirty.value);
 });
 
-// 按语言 key 字母序排列
-const langOptions = [
-  { label: 'English', value: 'en' },
-  { label: '日本語', value: 'ja' },
-  { label: '한국어', value: 'ko' },
-  { label: '简体中文', value: 'zh' },
-  { label: '繁體中文', value: 'zh-Hant' },
-];
+// 母语下拉：选项与顺序（en/ja/ko/zh）由 UI_LANGS 派生，label 用各语言的自称。
+const LANG_LABELS: Record<UiLang, string> = {
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어',
+  zh: '中文',
+};
+const langOptions = UI_LANGS.map((l) => ({ label: LANG_LABELS[l], value: l }));
+
+// —— 语音识别：识别语言 + 识别模型 ——
+// 识别语言下拉：auto 置顶，其余 en/ja/ko/zh 字母序（复用 UI_LANGS 顺序）。
+const asrLangOptions = computed(() => [
+  { label: t('settings.asrLanguageAuto'), value: 'auto' },
+  ...UI_LANGS.map((l) => ({ label: LANG_LABELS[l], value: l as string })),
+]);
+// 识别模型下拉：按当前识别语言 + 平台过滤，label 附模型近似大小。
+const platform = bridge().platform;
+const asrModelOptions = computed(() =>
+  asrModelsFor(props.form.asr.language, platform).map((m) => ({
+    label: `${t(m.nameKey)}（${humanBytes(m.approxBytes)}）`,
+    value: m.id,
+  })),
+);
+// 识别语言切换后，若当前模型已不在新语言的可选列表中，自动落到默认模型。
+watch(
+  () => props.form.asr.language,
+  (lang: AsrLang) => {
+    const available = asrModelsFor(lang, platform);
+    if (!available.some((m) => m.id === props.form.asr.model)) {
+      props.form.asr.model = DEFAULT_ASR_MODEL_ID;
+    }
+  },
+);
 const fontOptions = computed(() => [
   { label: t('settings.fontSmall'), value: 'small' },
   { label: t('settings.fontMedium'), value: 'medium' },
@@ -242,6 +272,16 @@ watch(() => props.form.fontSize, (v) => applyFontSize(v));
 
     <n-form-item :label="t('main.theme')">
       <n-select v-model:value="form.theme" :options="themeOptions" />
+    </n-form-item>
+
+    <div class="mb-2 mt-4 text-xs font-medium uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+      {{ t('settings.asrSection') }}
+    </div>
+    <n-form-item :label="t('settings.asrLanguage')">
+      <n-select v-model:value="form.asr.language" :options="asrLangOptions" />
+    </n-form-item>
+    <n-form-item :label="t('settings.asrModel')">
+      <n-select v-model:value="form.asr.model" :options="asrModelOptions" />
     </n-form-item>
 
     <n-form-item :label="t('settings.engine')">

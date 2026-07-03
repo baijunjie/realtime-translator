@@ -2,9 +2,10 @@
 import { computed, ref, h } from 'vue';
 import { NButton, NModal, NInput, NDropdown } from 'naive-ui';
 import type { DropdownMixedOption } from 'naive-ui/es/dropdown/src/interface';
-import { Settings, Trash2, Archive, Library, Eraser, LoaderCircle, TriangleAlert, MoreHorizontal, Mic, Square, RefreshCw } from '@lucide/vue';
+import { Settings, Trash2, Archive, Library, Eraser, LoaderCircle, TriangleAlert, MoreHorizontal, Mic, MonitorSpeaker, Square, RefreshCw } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
-import { settings } from '../composables/useSettings';
+import { getAsrModel, M2M100_SPEC } from '@rt/core';
+import { settings, saveSettings } from '../composables/useSettings';
 import {
   lines,
   partial,
@@ -20,11 +21,12 @@ import {
   translationError,
 } from '../composables/useTranscription';
 import TranscriptList from '../components/TranscriptList.vue';
+import ModelDownloadModal, { type DownloadTask } from '../components/ModelDownloadModal.vue';
 import { fmtDateTime } from '../utils/datetime';
 import { bridge } from '../bridge';
 
 const { t } = useI18n();
-const emit = defineEmits<{ 'open-settings': []; 'open-archive': []; needSetup: [] }>();
+const emit = defineEmits<{ 'open-settings': []; 'open-archive': [] }>();
 
 // 仅已定稿记录才算"有内容可清"：实时 partial 是瞬时的，清它没意义（归档也只存 lines）
 const hasContent = computed(() => lines.length > 0);
@@ -87,8 +89,30 @@ const errorDisplay = computed(() =>
 // setup 时 bridge 已由 mountApp 注入，可同步判定。
 const canForceUpdate = typeof bridge().forceUpdateApp === 'function';
 
+// 音源开关：仅当桥接声明支持系统音频时才显示（macOS）。切换即持久化。
+const supportsSystemAudio = bridge().audioSources?.includes('system') ?? false;
+const audioSourceTitle = computed(() =>
+  settings.value?.audioSource === 'system' ? t('main.audioSourceSystem') : t('main.audioSourceMic'),
+);
+function toggleAudioSource(): void {
+  const s = settings.value;
+  if (!s || recording.value || recordBusy.value) return;
+  void saveSettings({ ...s, audioSource: s.audioSource === 'system' ? 'mic' : 'system' });
+}
+
 // 移动端「...」溢出菜单（翻译开/关已移至设置的「翻译方式」，此处不再有翻译项）
 const mobileMenuOptions = computed<DropdownMixedOption[]>(() => [
+  ...(supportsSystemAudio
+    ? ([
+        {
+          key: 'audio-source',
+          label: audioSourceTitle.value,
+          icon: () => h(settings.value?.audioSource === 'system' ? MonitorSpeaker : Mic, { size: 16 }),
+          disabled: recording.value || recordBusy.value,
+        },
+        { type: 'divider', key: 'd0' },
+      ] satisfies DropdownMixedOption[])
+    : []),
   { key: 'delete', label: t('archive.delete'), icon: () => h(Trash2, { size: 16 }), disabled: !hasContent.value },
   { key: 'archive', label: t('main.archive'), icon: () => h(Archive, { size: 16 }), disabled: !hasContent.value },
   { type: 'divider', key: 'd3' },
@@ -104,6 +128,9 @@ const mobileMenuOptions = computed<DropdownMixedOption[]>(() => [
 
 function onMobileMenuSelect(key: string): void {
   switch (key) {
+    case 'audio-source':
+      toggleAudioSource();
+      break;
     case 'archive':
       void openArchiveModal();
       break;
@@ -136,23 +163,62 @@ const showMicModal = computed({
   },
 });
 
-// 录音按钮：停止无需权限；开始前先查权限——未决先弹说明再触发系统授权，已拒绝则引导去设置
+// 按需下载弹窗：录音前汇总缺失模型，确认后逐个下载，完成再继续启动流程。
+const downloadModalOpen = ref(false);
+const downloadTasks = ref<DownloadTask[]>([]);
+
+// 录音按钮：停止无需检查；开始前先汇总缺失模型（缺则弹下载弹窗），再走音源对应的权限/启动流程。
 async function onRecordClick(): Promise<void> {
-  // 启停在途（含入口处的模型/权限异步检查窗口）一律忽略，按钮同时也已禁用
+  // 启停在途一律忽略，按钮同时也已禁用
   if (recordBusy.value) return;
   if (recording.value) {
     toggleRecording();
     return;
   }
-  // ASR 模型缺失（如首次在蜂窝网络下跳过了下载）：回到下载页重走网络检查+确认，不进入录音流程
+  const s = settings.value;
+  if (!s) return;
+  const tasks: DownloadTask[] = [];
+  // ASR 模型：当前选中的识别模型未就绪则加下载任务
   try {
-    const { asrReady } = await bridge().getSetupStatus();
+    const { asrReady } = await bridge().getSetupStatus(s.asr.model);
     if (!asrReady) {
-      emit('needSetup');
-      return;
+      const spec = getAsrModel(s.asr.model);
+      if (spec) tasks.push({ kind: 'asr', modelId: spec.id, nameKey: spec.nameKey, sizeBytes: spec.approxBytes });
     }
   } catch {
-    /* 查询失败不拦截，继续走后续权限流程 */
+    /* 查询失败不拦截，按已就绪继续 */
+  }
+  // 本地翻译模型：开启翻译且用本地引擎、桥接需自行下载且未就绪时加下载任务
+  const getTrStatus = bridge().getTranslationSetupStatus;
+  if (s.translation.enabled && s.translation.engine !== 'cloud' && getTrStatus && bridge().downloadTranslationModel) {
+    try {
+      const { ready } = await getTrStatus();
+      if (!ready) tasks.push({ kind: 'translation', nameKey: 'models.m2m100', sizeBytes: M2M100_SPEC.approxDownloadBytes });
+    } catch {
+      /* 查询失败不拦截，按已就绪继续 */
+    }
+  }
+  if (tasks.length) {
+    // 有缺失：弹下载弹窗，done 后自动继续、cancel 则终止（不录音）
+    downloadTasks.value = tasks;
+    downloadModalOpen.value = true;
+    return;
+  }
+  await proceedToRecord();
+}
+
+// 下载完成后自动继续启动录音；下载取消则不录音。
+function onDownloadDone(): void {
+  void proceedToRecord();
+}
+
+// 模型就绪后的权限 + 启动流程。麦克风音源走权限说明流程；系统音源直接启动（授权由宿主处理，
+// 被拒会以 system-audio-permission 错误码回来）。
+async function proceedToRecord(): Promise<void> {
+  const usesSystem = supportsSystemAudio && settings.value?.audioSource === 'system';
+  if (usesSystem) {
+    toggleRecording();
+    return;
   }
   let status = 'granted';
   try {
@@ -206,6 +272,19 @@ function openMicSettings(): void {
         </n-button>
         <n-button quaternary circle :title="t('main.settings')" @click="$emit('open-settings')">
           <template #icon><Settings :size="18" /></template>
+        </n-button>
+        <!-- 音源开关：仅桥接支持系统音频时显示，图标即当前音源，点击切换 -->
+        <n-button
+          v-if="supportsSystemAudio"
+          quaternary
+          circle
+          :disabled="recording || recordBusy"
+          :title="audioSourceTitle"
+          @click="toggleAudioSource"
+        >
+          <template #icon>
+            <component :is="settings?.audioSource === 'system' ? MonitorSpeaker : Mic" :size="18" />
+          </template>
         </n-button>
         <n-button
           :type="recording ? 'error' : 'primary'"
@@ -304,6 +383,13 @@ function openMicSettings(): void {
         </div>
       </template>
     </n-modal>
+
+    <!-- 录音前的按需模型下载弹窗：done 后自动继续启动，cancel 则不录音 -->
+    <model-download-modal
+      v-model:show="downloadModalOpen"
+      :tasks="downloadTasks"
+      @done="onDownloadDone"
+    />
 
     <!-- bottom 计入 safe-area，避开 Home 指示条 -->
     <button

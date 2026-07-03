@@ -1,18 +1,20 @@
-// settings 纯逻辑的单元测试：默认值的母语推断、字段补齐与旧版本 JSON 兼容。
+// settings 纯逻辑的单元测试：默认值的母语推断、字段补齐与语言/模型校验。
 import { describe, expect, it } from 'vitest';
-import { makeDefaults, withDefaults } from './settings';
+import { UI_LANGS, makeDefaults, withDefaults } from './settings';
+
+describe('UI_LANGS', () => {
+  it('按 key 字母序渲染', () => {
+    expect(UI_LANGS).toEqual(['en', 'ja', 'ko', 'zh']);
+  });
+});
 
 describe('makeDefaults 母语推断', () => {
-  it('繁体地区/脚本（TW/HK/MO/Hant）推断为 zh-Hant', () => {
-    expect(makeDefaults(['zh-TW']).nativeLang).toBe('zh-Hant');
-    expect(makeDefaults(['zh-HK']).nativeLang).toBe('zh-Hant');
-    expect(makeDefaults(['zh-MO']).nativeLang).toBe('zh-Hant');
-    expect(makeDefaults(['zh-Hant-TW']).nativeLang).toBe('zh-Hant');
-  });
-
-  it('其余中文推断为简体 zh', () => {
+  it('任意中文变体（含 TW/HK/MO/Hant）一律推断为简体 zh', () => {
     expect(makeDefaults(['zh-CN']).nativeLang).toBe('zh');
     expect(makeDefaults(['zh']).nativeLang).toBe('zh');
+    expect(makeDefaults(['zh-TW']).nativeLang).toBe('zh');
+    expect(makeDefaults(['zh-HK']).nativeLang).toBe('zh');
+    expect(makeDefaults(['zh-Hant-TW']).nativeLang).toBe('zh');
   });
 
   it('ja / ko / en 按前缀命中', () => {
@@ -28,6 +30,12 @@ describe('makeDefaults 母语推断', () => {
   it('未知语言或空列表回退英语', () => {
     expect(makeDefaults(['fr-FR']).nativeLang).toBe('en');
     expect(makeDefaults([]).nativeLang).toBe('en');
+  });
+
+  it('识别默认 auto + sense-voice，音源默认麦克风', () => {
+    const d = makeDefaults([]);
+    expect(d.asr).toEqual({ language: 'auto', model: 'sense-voice' });
+    expect(d.audioSource).toBe('mic');
   });
 
   it('默认关闭翻译、引擎为本地 m2m100、云端三项留空', () => {
@@ -49,23 +57,26 @@ describe('withDefaults 字段补齐与校验', () => {
     expect(withDefaults({}, d)).toEqual(d);
   });
 
-  it('非法 nativeLang / fontSize / theme 回退默认', () => {
+  it('非法 nativeLang / fontSize / theme / audioSource 回退默认', () => {
     const s = withDefaults(
-      { nativeLang: 'fr', fontSize: 'huge', theme: 'blue' },
+      { nativeLang: 'fr', fontSize: 'huge', theme: 'blue', audioSource: 'bluetooth' },
       d,
     );
     expect(s.nativeLang).toBe(d.nativeLang);
     expect(s.fontSize).toBe('medium');
     expect(s.theme).toBe('system');
+    expect(s.audioSource).toBe('mic');
   });
 
   it('合法字段原样保留', () => {
     const s = withDefaults(
       {
         onboarded: true,
-        nativeLang: 'zh-Hant',
+        nativeLang: 'ja',
         fontSize: 'large',
         theme: 'dark',
+        audioSource: 'mic',
+        asr: { language: 'ja', model: 'zipformer-ja-reazonspeech' },
         translation: {
           enabled: true,
           engine: 'cloud',
@@ -75,9 +86,11 @@ describe('withDefaults 字段补齐与校验', () => {
       d,
     );
     expect(s.onboarded).toBe(true);
-    expect(s.nativeLang).toBe('zh-Hant');
+    expect(s.nativeLang).toBe('ja');
     expect(s.fontSize).toBe('large');
     expect(s.theme).toBe('dark');
+    expect(s.audioSource).toBe('mic');
+    expect(s.asr).toEqual({ language: 'ja', model: 'zipformer-ja-reazonspeech' });
     expect(s.translation).toEqual({
       enabled: true,
       engine: 'cloud',
@@ -90,39 +103,33 @@ describe('withDefaults 字段补齐与校验', () => {
     expect(s.translation.cloud).toEqual({ baseURL: '', apiKey: '', model: '' });
   });
 
-  it('已移除的本地引擎值（local / nllb）迁移到 m2m100', () => {
+  it('非 cloud 的引擎值一律回落 m2m100', () => {
     expect(withDefaults({ translation: { engine: 'local' } }, d).translation.engine).toBe('m2m100');
     expect(withDefaults({ translation: { engine: 'nllb' } }, d).translation.engine).toBe('m2m100');
     expect(withDefaults({ translation: { engine: 'cloud' } }, d).translation.engine).toBe('cloud');
   });
 
-  describe('旧版 translation.targetLang 迁移', () => {
-    it('targetLang 为语言码：当母语初值，且视为开启翻译', () => {
-      const s = withDefaults({ translation: { targetLang: 'ja' } }, d);
-      expect(s.nativeLang).toBe('ja');
-      expect(s.translation.enabled).toBe(true);
+  describe('asr 语言与模型校验', () => {
+    it('非法识别语言回落 auto', () => {
+      const s = withDefaults({ asr: { language: 'fr', model: 'sense-voice' } }, d);
+      expect(s.asr.language).toBe('auto');
     });
 
-    it("targetLang 为 'off'：翻译关闭，母语落默认", () => {
-      const s = withDefaults({ translation: { targetLang: 'off' } }, d);
-      expect(s.nativeLang).toBe(d.nativeLang);
-      expect(s.translation.enabled).toBe(false);
+    it('模型不在注册表：回落 sense-voice', () => {
+      const s = withDefaults({ asr: { language: 'auto', model: 'ghost-model' } }, d);
+      expect(s.asr.model).toBe('sense-voice');
     });
 
-    it('显式 enabled 优先于 targetLang 推断', () => {
-      const s = withDefaults(
-        { translation: { enabled: false, targetLang: 'ja' } },
-        d,
-      );
-      expect(s.translation.enabled).toBe(false);
+    it('模型存在但不支持当前识别语言：回落 sense-voice', () => {
+      // paraformer-zh 只支持 zh，识别语言却设 ja → 不匹配，回落默认模型
+      const s = withDefaults({ asr: { language: 'ja', model: 'paraformer-zh' } }, d);
+      expect(s.asr.language).toBe('ja');
+      expect(s.asr.model).toBe('sense-voice');
     });
 
-    it('新字段 nativeLang 优先于旧 targetLang', () => {
-      const s = withDefaults(
-        { nativeLang: 'ko', translation: { targetLang: 'ja' } },
-        d,
-      );
-      expect(s.nativeLang).toBe('ko');
+    it('模型存在且支持当前识别语言：保留', () => {
+      const s = withDefaults({ asr: { language: 'zh', model: 'paraformer-zh' } }, d);
+      expect(s.asr).toEqual({ language: 'zh', model: 'paraformer-zh' });
     });
   });
 });

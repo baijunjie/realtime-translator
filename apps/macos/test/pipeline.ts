@@ -2,6 +2,7 @@
 //   npm run test-pipeline -- <16kHz-mono.wav>
 import path from 'node:path';
 import { readWave } from 'sherpa-onnx-node';
+import { DEFAULT_ASR_MODEL_ID } from '@rt/core';
 import { TranscriptionPipeline, SAMPLE_RATE } from '../src/main/pipeline';
 
 const wavPath = process.argv[2];
@@ -20,7 +21,7 @@ if (wave.sampleRate !== SAMPLE_RATE) {
 const modelsDir = path.join(__dirname, '..', '..', 'models');
 console.log('加载模型...');
 const t0 = Date.now();
-const pipeline = new TranscriptionPipeline(modelsDir, {
+const pipeline = new TranscriptionPipeline(modelsDir, DEFAULT_ASR_MODEL_ID, 'auto', {
   onSegment: (seg) => {
     const ts = seg.start.toFixed(1).padStart(6);
     console.log(`[${ts}s] [${seg.lang}] ${seg.text}`);

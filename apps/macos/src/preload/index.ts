@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 import type { ElectronApi } from '../shared/types';
+import { availableAudioSources } from '../shared/audio-source';
 
 // 订阅主进程事件并返回反注册函数（AppBridge on* 契约：追加语义 + 可退订）
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
@@ -9,6 +10,9 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
 }
 
 const api: ElectronApi = {
+  platform: 'macos',
+  // 系统音频采集要求 macOS 14.2+；不满足时仅暴露麦克风（与主进程的音源收敛判定共用逻辑）。
+  audioSources: availableAudioSources(process.getSystemVersion()),
   startPipeline: () => ipcRenderer.invoke('pipeline:start'),
   prewarmPipeline: () => ipcRenderer.send('pipeline:prewarm'),
   stopPipeline: () => ipcRenderer.invoke('pipeline:stop'),
@@ -18,8 +22,10 @@ const api: ElectronApi = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
   testCloud: (cfg) => ipcRenderer.invoke('translation:test-cloud', cfg),
-  getSetupStatus: () => ipcRenderer.invoke('setup:get-status'),
-  downloadAsrModels: () => ipcRenderer.invoke('setup:download-asr'),
+  getSetupStatus: (modelId) => ipcRenderer.invoke('setup:get-status', modelId),
+  downloadAsrModels: (modelId) => ipcRenderer.invoke('setup:download-asr', modelId),
+  listModels: () => ipcRenderer.invoke('models:list'),
+  deleteModel: (kind, id) => ipcRenderer.invoke('models:delete', kind, id),
   getTranslationSetupStatus: () => ipcRenderer.invoke('translation:setup-status'),
   downloadTranslationModel: () => ipcRenderer.invoke('translation:download'),
   onSetupProgress: (cb) => subscribe('setup:progress', cb),

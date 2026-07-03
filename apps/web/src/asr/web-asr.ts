@@ -15,7 +15,14 @@
 //  - 回吐：Worker 的 partial/segment 消息转成 @rt/core 的 PartialPayload/SegmentPayload，
 //    经 onPartial/onSegment 回调上抛。
 
-import type { SegmentPayload, PartialPayload, StatusPayload, PipelineErrorCode } from '@rt/core';
+import type {
+  SegmentPayload,
+  PartialPayload,
+  StatusPayload,
+  PipelineErrorCode,
+  AsrLang,
+} from '@rt/core';
+import { DEFAULT_ASR_MODEL_ID } from '@rt/core';
 import { areModelsCached, ensureModelsCached, readCachedModels } from './model-store';
 import type { ToWorker, FromWorker } from './worker-protocol';
 
@@ -26,6 +33,12 @@ export interface WebAsrCallbacks {
   onSegment?: (s: SegmentPayload) => void;
   onPartial?: (p: PartialPayload) => void;
   onStatus?: (s: StatusPayload) => void;
+}
+
+/** 桥接层按当前设置注入的识别配置（模型 id + 识别语言）。 */
+export interface WebAsrConfig {
+  modelId: string;
+  language: AsrLang;
 }
 
 export interface WebAsrStartResult {
@@ -51,6 +64,12 @@ export class WebAsr {
   private workerFailed = false;
   private running = false;
 
+  // 当前生效的识别配置（web 平台仅 sense-voice，故 modelId 恒为默认；language 可变）。
+  // 桥接层在 start/prewarm 前按最新设置注入。
+  private config: WebAsrConfig = { modelId: DEFAULT_ASR_MODEL_ID, language: 'auto' };
+  // 常驻 worker 内 recognizer 当前所用的识别语言；与 config.language 不一致时需重建。
+  private workerLanguage: AsrLang | null = null;
+
   // start/stop/prewarm 单飞串行：三类操作一律入队到同一条链尾逐次执行——调用顺序即生效顺序，
   // 「最后一次意图」必然最后生效。internal 各自幂等（start 遇 running 短路、worker 复用、stop 幂等），
   // 逐次执行代价极低。避免并发 start 泄漏双 Worker/双麦克风流、或 stop 在 start 的 await 间隙插入
@@ -63,6 +82,11 @@ export class WebAsr {
 
   setCallbacks(cbs: WebAsrCallbacks): void {
     this.cbs = cbs;
+  }
+
+  /** 注入当前识别配置（模型 id + 识别语言）。桥接层在每次 start/prewarm 前按最新设置调用。 */
+  setConfig(config: WebAsrConfig): void {
+    this.config = config;
   }
 
   isRunning(): boolean {
@@ -82,21 +106,26 @@ export class WebAsr {
     this.worker = null;
     this.workerReady = false;
     this.workerFailed = false;
+    this.workerLanguage = null;
   }
 
   /** 冷启动识别 Worker：等模型缓存就绪 → 取字节 → 建 Worker → init（写 FS + 建 VAD/recognizer）。 */
   private async startWorker(): Promise<void> {
+    const modelId = this.config.modelId;
     // 确保模型已缓存（正常路径下 SetupScreen 已先下过；这里兜底，命中即秒回）。
-    if (!(await areModelsCached())) {
-      await ensureModelsCached();
+    if (!(await areModelsCached(modelId))) {
+      await ensureModelsCached(modelId);
     }
-    const models = await readCachedModels();
+    const models = await readCachedModels(modelId);
 
     // module worker：worker 内 import @rt/core（Vite dev 原生 ESM / build 打包）；
     // sherpa 胶水是 classic 全局脚本，由 worker 内部 fetch+eval 加载（见 sherpa-worker 头注）。
     this.worker = new Worker(new URL('./sherpa-worker.ts', import.meta.url), {
       type: 'module',
     });
+
+    // 快照本次 init 的识别语言：ready 回执到达时据此登记 workerLanguage（避免期间 config 改动串味）。
+    const initLanguage = this.config.language;
 
     const ready = new Promise<void>((resolve, reject) => {
       const w = this.worker!;
@@ -105,6 +134,8 @@ export class WebAsr {
         switch (msg.type) {
           case 'ready':
             this.workerReady = true;
+            // 记录 worker 内 recognizer 实际生效的识别语言（init 时用的 config.language）。
+            this.workerLanguage = initLanguage;
             resolve();
             break;
           case 'partial':
@@ -140,11 +171,12 @@ export class WebAsr {
       };
     });
 
-    // init：传模型字节（转移底层 buffer，避免拷贝）+ sherpa 资源基址。
+    // init：传模型字节（转移底层 buffer，避免拷贝）+ sherpa 资源基址 + 识别语言。
     const initMsg: ToWorker = {
       type: 'init',
       models: Array.from(models, ([name, bytes]) => ({ name, bytes })),
       sherpaBaseUrl: this.sherpaBaseUrl(),
+      language: initLanguage,
     };
     const transfer = initMsg.models.map((m) => m.bytes.buffer);
     this.worker.postMessage(initMsg, transfer);
@@ -175,6 +207,50 @@ export class WebAsr {
   }
 
   /**
+   * 丢弃空闲的常驻 worker（删除 ASR 模型后调用）：会话进行中不动（删除已在桥接层拒绝，此处兜底）。
+   * 排到操作链尾，避免与在途 start/prewarm 竞争。丢弃后下次 start 会重查缓存、必要时重下载。
+   */
+  dropIdleWorker(): Promise<void> {
+    return this.enqueue(() => {
+      if (!this.running) this.discardWorker();
+      return Promise.resolve();
+    });
+  }
+
+  /**
+   * 识别语言变化时重建常驻 worker 的 recognizer（模型字节仍在 WASM FS，无需重下）。
+   * 等 'reconfigured' 回执（或超时兜底）：成功登记新语言；失败置 workerFailed，交调用方冷启动重建。
+   * 与 stopInternal 的 flush 等待同构（临时监听 + 超时），不干扰常驻 onmessage。
+   */
+  private reconfigureWorker(language: AsrLang): Promise<void> {
+    const w = this.worker;
+    if (!w) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      let done = false;
+      const finish = (): void => {
+        if (done) return;
+        done = true;
+        w.removeEventListener('message', onMsg);
+        clearTimeout(timer);
+        resolve();
+      };
+      const onMsg = (ev: MessageEvent): void => {
+        const msg = ev.data as FromWorker | undefined;
+        if (msg?.type !== 'reconfigured') return;
+        if (msg.error) {
+          this.workerFailed = true; // 重建失败：标记带病，由调用方冷启动重建
+        } else {
+          this.workerLanguage = language;
+        }
+        finish();
+      };
+      w.addEventListener('message', onMsg);
+      const timer = setTimeout(finish, 5000); // 兜底：worker 异常时也不挂起
+      w.postMessage({ type: 'reconfigure', language } satisfies ToWorker);
+    });
+  }
+
+  /**
    * 预热识别 Worker：仅把模型装入内存，绝不请求麦克风/权限。
    * UI 在调用前先行禁用录音按钮，故除录音会话进行中外，任何路径（含模型未缓存的跳过、
    * worker 已就绪、失败）都必须以 stopped 状态收尾解禁；失败仅记录，
@@ -186,14 +262,22 @@ export class WebAsr {
       this.cbs.onStatus?.({ state: 'running' });
       return;
     }
-    if (!(await areModelsCached())) {
+    if (!(await areModelsCached(this.config.modelId))) {
       this.cbs.onStatus?.({ state: 'stopped' }); // 未下载不预热（不触发下载），仅解禁按钮
       return;
     }
     if (this.worker && this.workerFailed) this.discardWorker(); // 带病 worker 先丢弃，避免被当作已就绪
-    if (this.worker) {
-      this.cbs.onStatus?.({ state: 'stopped' });
-      return;
+    if (this.worker && this.workerReady) {
+      // 识别语言变了则重建 recognizer（模型仍在内存），保持预热与当前设置一致。
+      if (this.workerLanguage !== this.config.language) {
+        await this.reconfigureWorker(this.config.language);
+      }
+      if (this.workerFailed) {
+        this.discardWorker(); // 重建失败：丢弃，走下面冷启动重建
+      } else {
+        this.cbs.onStatus?.({ state: 'stopped' });
+        return;
+      }
     }
     this.cbs.onStatus?.({ state: 'loading' });
     try {
@@ -219,8 +303,18 @@ export class WebAsr {
     }
     try {
       if (this.worker && this.workerReady) {
-        // 复用常驻 worker：模型仍在 WASM FS，只需重置会话计时基线，秒级恢复。
-        this.worker.postMessage({ type: 'reset' } satisfies ToWorker);
+        // 复用常驻 worker：模型仍在 WASM FS。识别语言变了则先重建 recognizer（免重下），
+        // 否则只需重置会话计时基线，秒级恢复。
+        if (this.workerLanguage !== this.config.language) {
+          await this.reconfigureWorker(this.config.language);
+        }
+        if (this.workerFailed) {
+          // 重建识别器失败：丢弃冷启动重建。
+          this.discardWorker();
+          await this.startWorker();
+        } else {
+          this.worker.postMessage({ type: 'reset' } satisfies ToWorker);
+        }
       } else {
         // 冷启动（含模型加载）。任何一步失败都不进入 running。
         await this.startWorker();

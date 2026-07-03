@@ -38,8 +38,8 @@
 //              availability({source, target})     -> { status: "installed"|"supported"|"unsupported" }
 //
 //  Short language codes used across the app: zh / en / ja / ko / yue.
-//   - zh / zh-Hant both map to Apple language "zh" (script post-processing for
-//     Traditional is done in JS via M2M100_SPEC.toScript, same as the cloud path).
+//   - zh maps to Apple language "zh". Traditional Chinese is unified into Simplified
+//     upstream (@rt/core), so no Traditional-specific code reaches this plugin.
 //   - yue (Cantonese) has no dedicated Apple translation language → best-effort
 //     mapped to "zh" (Mandarin written Chinese). Documented; callers may still get
 //     "unavailable" if the device lacks the pack.
@@ -151,13 +151,13 @@ public class RealtimeTranslatePlugin: CAPPlugin, CAPBridgedPlugin {
 
   /// Map our short ASR/app language codes to an Apple `Locale.Language`.
   /// Returns nil for codes Apple's Translation framework cannot represent.
-  ///   zh, zh-Hant -> "zh"   (Traditional script handled in JS post-processing)
+  ///   zh          -> "zh"   (Traditional is unified into Simplified upstream)
   ///   yue         -> "zh"   (best-effort; no dedicated Cantonese translation language)
   ///   en/ja/ko    -> as-is
   @available(iOS 18.0, *)
   static func appleLanguage(for shortCode: String) -> Locale.Language? {
     switch shortCode {
-    case "zh", "zh-Hant", "yue":
+    case "zh", "yue":
       return Locale.Language(identifier: "zh")
     case "en":
       return Locale.Language(identifier: "en")

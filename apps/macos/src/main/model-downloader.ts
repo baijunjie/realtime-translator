@@ -1,15 +1,15 @@
-// 运行时下载 ASR 模型（方案 B：不打包，首次启动联网下载）。
-// 只下 int8 量化版所需的文件（~230MB），避免 GitHub 发布的 tar 包还含 894MB 全精度模型。
+// 运行时下载 ASR 模型（方案 B：不打包，首次启动/按需联网下载）。
+// 每个模型只下其注册表登记的文件（多为 int8 量化版），另加所有模型共用的 Silero VAD 依赖。
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline as streamPipeline } from 'node:stream/promises';
-import { ASR_MODELS, requiredAsrFiles } from '@rt/core';
+import { SILERO_VAD, getAsrModel, requiredAsrFiles, type AsrModelFile } from '@rt/core';
 import type { SetupProgress } from '../shared/types';
 
-/** ASR 模型是否齐全（清单来自 @rt/core 的共享登记表） */
-export function asrModelsReady(modelsDir: string): boolean {
-  return requiredAsrFiles().every((f) => fs.existsSync(path.join(modelsDir, f)));
+/** 指定模型（含公共依赖 VAD）是否齐全（清单来自 @rt/core 的共享登记表）。 */
+export function asrModelsReady(modelsDir: string, modelId: string): boolean {
+  return requiredAsrFiles(modelId).every((f) => fs.existsSync(path.join(modelsDir, f)));
 }
 
 // 无进展看门狗超时：连续这么久没收到任何新字节即判定连接停滞并中止本次下载。
@@ -73,29 +73,40 @@ async function downloadFile(
 }
 
 /**
- * 下载并安装 ASR 模型（Silero VAD + SenseVoice int8，总计 ~230MB）。
- * 进度以 model.int8.onnx 为主（~228MB，占比 99%+）。
+ * 下载并安装指定 ASR 模型：公共依赖 Silero VAD（缺失才下）+ 该模型全部文件。
+ * 进度按本次全部待下载文件的合计字节聚合上报：total 取注册表 approxBytes 之和，
+ * loaded 跨文件累计（已完成文件的实收字节 + 当前文件的实时字节）。小文件在前、大文件在后。
  */
 export async function downloadAsrModels(
   modelsDir: string,
+  modelId: string,
   onProgress: (p: SetupProgress) => void
 ): Promise<void> {
-  const { sileroVad, senseVoiceTokens, senseVoiceModel } = ASR_MODELS;
-  const localPath = (f: { dir: string; filename: string }) =>
-    path.join(modelsDir, f.dir, f.filename);
+  const spec = getAsrModel(modelId);
+  if (!spec) throw new Error(`未知的识别模型: ${modelId}`);
 
-  fs.mkdirSync(path.join(modelsDir, senseVoiceModel.dir), { recursive: true });
+  const localPath = (f: AsrModelFile) => path.join(modelsDir, f.dir, f.filename);
+  // 公共依赖 VAD + 该模型全部文件；已存在的跳过（只补缺）。按近似大小升序：小文件先下。
+  const toDownload = [SILERO_VAD, ...spec.files]
+    .filter((f) => !fs.existsSync(localPath(f)))
+    .sort((a, b) => a.approxBytes - b.approxBytes);
 
-  // 小文件先下（瞬间完成）
-  await downloadFile(sileroVad.url, localPath(sileroVad));
-  await downloadFile(senseVoiceTokens.url, localPath(senseVoiceTokens));
+  const total = toDownload.reduce((sum, f) => sum + f.approxBytes, 0);
+  for (const f of toDownload) {
+    fs.mkdirSync(path.dirname(localPath(f)), { recursive: true });
+  }
 
-  // 大文件带进度
-  await downloadFile(senseVoiceModel.url, localPath(senseVoiceModel), (loaded, total) => {
-    onProgress({ loaded, total });
-  });
+  let base = 0; // 已完成文件的累计实收字节
+  for (const f of toDownload) {
+    let last = 0;
+    await downloadFile(f.url, localPath(f), (loaded) => {
+      last = loaded;
+      onProgress({ loaded: base + loaded, total });
+    });
+    base += last;
+  }
 
-  if (!asrModelsReady(modelsDir)) {
+  if (!asrModelsReady(modelsDir, modelId)) {
     throw new Error('ASR 模型安装后校验失败');
   }
 }

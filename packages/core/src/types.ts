@@ -45,6 +45,7 @@ export interface PartialPayload {
  */
 export type PipelineErrorCode =
   | 'mic-permission' // 麦克风权限被拒/未授予
+  | 'system-audio-permission' // 系统音频录制权限被拒
   | 'audio-capture-failed' // 音频采集链路建立失败（无输入设备/被占用等）
   | 'audio-interrupted' // 系统音频中断（媒体服务重置等）
   | 'asr-init-failed' // 识别引擎初始化/模型加载失败
@@ -123,8 +124,21 @@ export interface TranslationSettings {
 /** 主页转写字体大小档位 */
 export type FontSize = 'small' | 'medium' | 'large';
 
-/** 界面/母语语言码（界面文案 + 翻译目标）。zh=简体中文，zh-Hant=繁體中文 */
-export type UiLang = 'zh' | 'zh-Hant' | 'ja' | 'en' | 'ko';
+/** 界面/母语语言码（界面文案 + 翻译目标）。zh=中文（繁体并入简体）。 */
+export type UiLang = 'en' | 'ja' | 'ko' | 'zh';
+
+/**
+ * 识别语言设置：auto 交由模型自动判别，其余为强制识别语言。
+ * 粤语不作为用户可选项，但 SenseVoice auto 模式仍可能输出内部语言码 yue，
+ * 翻译链路对 yue 的处理保留（见 translation/local-spec）。
+ */
+export type AsrLang = 'auto' | 'en' | 'ja' | 'ko' | 'zh';
+
+/** 运行平台标识：由各端桥接注入，用于按平台过滤可用模型、收敛音源等。 */
+export type Platform = 'macos' | 'web' | 'ios';
+
+/** 音频采集来源：麦克风 / 系统音频（不支持系统音频的端在桥接层收敛为 mic）。 */
+export type AudioSource = 'mic' | 'system';
 
 /** 主题偏好：浅色 / 深色 / 跟随系统 */
 export type ThemePref = 'light' | 'dark' | 'system';
@@ -132,11 +146,21 @@ export type ThemePref = 'light' | 'dark' | 'system';
 /** 麦克风权限状态（macOS systemPreferences.getMediaAccessStatus） */
 export type MicPermission = 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
 
-/**
- * 网络连接类型，用于蜂窝网络下下载模型（ASR 约 230MB / 本地翻译约 630MB）前的确认。
- * unknown 表示平台无法判断连接类型，按「不打扰」处理（不弹确认、维持现状直接下载）。
- */
-export type NetworkType = 'wifi' | 'cellular' | 'unknown';
+/** 模型类别：识别模型 / 翻译模型。 */
+export type ModelKind = 'asr' | 'translation';
+
+/** 模型管理页的一行数据；显示名由 UI 按注册表 nameKey 解析，不在此携带。 */
+export interface ModelInfo {
+  kind: ModelKind;
+  /** 注册表 id（ASR）或引擎标识（翻译）。 */
+  id: string;
+  /** 已占用磁盘字节。 */
+  sizeBytes: number;
+  /** 是否已下载到本地。 */
+  downloaded: boolean;
+  /** 是否为当前设置选中的模型。 */
+  inUse: boolean;
+}
 
 /** 归档里的一行对话 */
 export interface ArchiveLine {
@@ -162,6 +186,13 @@ export interface ArchiveSummary {
   lastLine: string;
 }
 
+/** 识别设置：识别语言 + 选用的 ASR 模型。 */
+export interface AsrSettings {
+  language: AsrLang;
+  /** ASR 模型注册表 id（见 models.ts）。 */
+  model: string;
+}
+
 /** 持久化到本地（electron userData）的应用设置 */
 export interface AppSettings {
   /** 是否已完成首次语言引导 */
@@ -171,5 +202,9 @@ export interface AppSettings {
   fontSize: FontSize;
   /** 主题偏好 */
   theme: ThemePref;
+  /** 识别语言与模型 */
+  asr: AsrSettings;
+  /** 音频采集来源 */
+  audioSource: AudioSource;
   translation: TranslationSettings;
 }

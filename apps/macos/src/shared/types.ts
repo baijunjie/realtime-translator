@@ -8,6 +8,7 @@ import type {
   TranslationStatusPayload,
   TranslationEngine,
   CloudTranslationConfig,
+  AsrLang,
 } from '@rt/core';
 
 // 重新导出领域类型与桥接契约，使 apps/macos 内既有的 `from '../shared/types'` / `@shared/types` 继续可用。
@@ -36,6 +37,12 @@ export type {
   ArchiveSummary,
   AppSettings,
   AppBridge,
+  AsrLang,
+  AsrSettings,
+  Platform,
+  AudioSource,
+  ModelInfo,
+  ModelKind,
 } from '@rt/core';
 
 // Electron preload 暴露给渲染层的 window.api 的实际形状：在平台无关的 AppBridge 之上，
@@ -63,7 +70,7 @@ export type ElectronApi = AppBridge & {
 
 /** ASR 子进程(utilityProcess) ←→ 主进程 的消息协议 */
 export type MainToAsr =
-  | { type: 'init'; modelsDir: string }
+  | { type: 'init'; modelsDir: string; modelId: string; language: AsrLang }
   | { type: 'audio'; samples: Float32Array }
   | { type: 'flush' }
   /** 开始新一次录音会话：重置 segment.start 的计时基线（子进程跨会话复用） */

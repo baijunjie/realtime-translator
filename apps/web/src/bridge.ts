@@ -28,6 +28,9 @@ import {
   translateFinalizedSegment,
   createTranslateProgressAggregator,
   createCallbackHub,
+  ASR_MODELS,
+  getAsrModel,
+  DEFAULT_ASR_MODEL_ID,
 } from '@rt/core';
 import type {
   AppBridge,
@@ -38,7 +41,8 @@ import type {
   CloudTranslationConfig,
   StartResult,
   MicPermission,
-  NetworkType,
+  ModelInfo,
+  ModelKind,
   SetupStatus,
   SetupProgress,
   SegmentPayload,
@@ -48,15 +52,14 @@ import type {
   TranslationStatusPayload,
 } from '@rt/core';
 import { WebAsr } from './asr/web-asr';
-import { areModelsCached, ensureModelsCached, ASR_MODEL_CACHE_NAME } from './asr/model-store';
+import {
+  areModelsCached,
+  ensureModelsCached,
+  deleteAsrModelFromCache,
+  ASR_MODEL_CACHE_NAME,
+} from './asr/model-store';
 import { WebLocalTranslator, type ModelProgress } from './translation/web-local-translator';
 import { isIOS } from './platform';
-
-// Network Information API 的最小类型声明（未进 TS 标准 lib，且各浏览器支持不一）。
-// 只取判断蜂窝所需的 type 字段，其余能力（downlink、effectiveType 等）不声明。
-interface NetworkInformation {
-  readonly type?: 'bluetooth' | 'cellular' | 'ethernet' | 'none' | 'wifi' | 'wimax' | 'other' | 'unknown';
-}
 
 const DB_NAME = 'realtime-translator';
 const DB_VERSION = 1;
@@ -87,11 +90,30 @@ async function isTranslationModelCached(): Promise<boolean> {
   }
 }
 
+// 删除 Transformers.js 缓存里属于本地翻译模型（M2M100）的全部条目：按 URL 含 modelId 逐条删，
+// 不清整个缓存（同缓存名可能存放其他 Transformers.js 资源）。删后翻译器实例须置空重建。
+async function deleteTranslationModelFromCache(): Promise<void> {
+  if (typeof caches === 'undefined') return;
+  const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
+  const keys = await cache.keys();
+  await Promise.all(
+    keys.filter((req) => req.url.includes(M2M100_SPEC.modelId)).map((req) => cache.delete(req)),
+  );
+}
+
 // iOS/iPadOS 的 WebKit 单标签页内存装不下本地翻译模型（与 ASR 共存会崩，且 4-bit 量化在
 // ORT-web 里也跑不起来），故这些设备不提供本地翻译、引擎恒为云端。所有产出 settings 的
 // 路径（读/写）统一经此收口，保证 getSettings 与翻译热路径看到的引擎一致，且不会去建本地模型。
 function applyPlatformConstraints(s: AppSettings): AppSettings {
   if (isIOS()) s.translation.engine = 'cloud';
+  // web 不支持系统音频（getDisplayMedia 无法可靠采到系统声音），音源恒收敛为麦克风。
+  s.audioSource = 'mic';
+  // 识别模型若在 web 平台不可用（注册表 platforms 不含 web，或 id 未知），回落默认模型
+  // （sense-voice，全平台可用且支持全部识别语言，与已归一化的 asr.language 不冲突）。
+  const spec = getAsrModel(s.asr.model);
+  if (!spec || !spec.platforms.includes('web')) {
+    s.asr.model = DEFAULT_ASR_MODEL_ID;
+  }
   return s;
 }
 
@@ -259,6 +281,15 @@ export function createWebBridge(): AppBridge {
     },
   });
 
+  // 按当前设置（识别模型 + 识别语言）同步给 WebAsr：在每次 start/prewarm 前调用，
+  // 使冷启动 init 或复用重建都用到最新配置（识别语言变化触发 recognizer 重建，模型不重下）。
+  // cachedSettings 尚未就绪时 WebAsr 沿用其默认（sense-voice / auto）。
+  function syncAsrConfig(): void {
+    if (cachedSettings) {
+      asr.setConfig({ modelId: cachedSettings.asr.model, language: cachedSettings.asr.language });
+    }
+  }
+
   // ---- MicPermission 归一化（Permissions API 的字符串 → @rt/core 联合类型） ----
   // 浏览器只有 granted/denied/prompt；prompt 对应「尚未决定」。
   function asMicPermission(state: PermissionState): MicPermission {
@@ -268,6 +299,9 @@ export function createWebBridge(): AppBridge {
   }
 
   const api: AppBridge = {
+    // 运行平台标识：UI 据此按 platform 过滤可用模型（web 只出现 sense-voice）等。
+    platform: 'web',
+    // audioSources 不声明：web 不支持系统音频，缺省即视为 ['mic']（UI 不渲染音源开关）。
     // iOS/iPadOS 上本地翻译模型装不下 WebKit 内存 → 只提供云端翻译（UI 据此隐藏本地引擎选项）。
     // 构建期注入的发布版本串；define 缺失的环境（如单测导入）下不暴露
     appVersion: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : undefined,
@@ -276,10 +310,12 @@ export function createWebBridge(): AppBridge {
     // ===== ASR 管线 =====
     async startPipeline(): Promise<StartResult> {
       // 请求麦克风 + 建 AudioWorklet 采音，帧送 sherpa worker 实时识别。
+      syncAsrConfig();
       return asr.start();
     },
     prewarmPipeline(): void {
       // 进主界面即后台装载 ASR 模型（不触麦克风）：fire-and-forget，失败静默（预热内部已处理并解禁按钮）。
+      syncAsrConfig();
       void asr.prewarm().catch(() => undefined);
     },
     async stopPipeline(): Promise<{ ok: boolean }> {
@@ -301,15 +337,6 @@ export function createWebBridge(): AppBridge {
     },
     openMicSettings(): void {
       // 浏览器无法以编程方式打开系统/站点设置；空实现（UI 已对 web 做引导文案）。
-    },
-
-    // ===== 网络类型（Network Information API） =====
-    async getNetworkType(): Promise<NetworkType> {
-      // iOS Safari/PWA 无此 API，恒 unknown；桌面 Chrome 等亦常不报 type，同样落 unknown。
-      const conn = (navigator as { connection?: NetworkInformation }).connection;
-      if (conn?.type === 'cellular') return 'cellular';
-      if (conn?.type === 'wifi') return 'wifi';
-      return 'unknown';
     },
 
     // ===== 设置（IndexedDB） =====
@@ -341,20 +368,80 @@ export function createWebBridge(): AppBridge {
     },
 
     // ===== 首次安装 / 模型下载（Phase 2） =====
-    async getSetupStatus(): Promise<SetupStatus> {
-      // 检查 Cache Storage 里 sherpa-onnx 模型（@rt/core requiredAsrFiles）是否齐全。
+    async getSetupStatus(modelId: string): Promise<SetupStatus> {
+      // 检查 Cache Storage 里指定模型（含公共依赖 VAD）是否齐全。
       // 齐全则直接落主界面；否则 UI 显示 SetupScreen 触发 downloadAsrModels。
       try {
-        return { asrReady: await areModelsCached() };
+        return { asrReady: await areModelsCached(modelId) };
       } catch {
         return { asrReady: false };
       }
     },
-    async downloadAsrModels(): Promise<{ ok: boolean; error?: string }> {
-      // 按 @rt/core ASR_MODELS 下载 Silero VAD + SenseVoice（~230MB）到 Cache Storage，
+    async downloadAsrModels(modelId: string): Promise<{ ok: boolean; error?: string }> {
+      // 按 @rt/core 注册表下载指定模型的 Silero VAD + 模型文件到 Cache Storage，
       // 边下边通过 setupProgressCb 回吐 { loaded, total } 聚合进度。首次后命中缓存即秒回。
       try {
-        await ensureModelsCached((p) => setupProgressCb.emit({ loaded: p.loaded, total: p.total }));
+        await ensureModelsCached(modelId, (p) =>
+          setupProgressCb.emit({ loaded: p.loaded, total: p.total }),
+        );
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+
+    // ===== 模型管理页：列出 / 删除本地模型 =====
+    async listModels(): Promise<ModelInfo[]> {
+      const s = cachedSettings ?? (await readSettingsOnce());
+      const models: ModelInfo[] = [];
+      // ASR：仅列出 platforms 含 web 的模型（web 目前只有 sense-voice）。
+      for (const spec of ASR_MODELS) {
+        if (!spec.platforms.includes('web')) continue;
+        const downloaded = await areModelsCached(spec.id);
+        // sizeBytes：已下载时直接用注册表 approxBytes——Cache API 无低成本取真实字节数的途径，
+        // 逐条读 blob 统计会把 ~230MB 拉进内存，得不偿失；未下载为 0。
+        models.push({
+          kind: 'asr',
+          id: spec.id,
+          sizeBytes: downloaded ? spec.approxBytes : 0,
+          downloaded,
+          inUse: s.asr.model === spec.id,
+        });
+      }
+      // 翻译（M2M100，Transformers.js Cache API 缓存）。同理已缓存时用规格近似字节。
+      // iOS/iPadOS 上本地翻译不可用（引擎恒为云端，见 applyPlatformConstraints），不列该条目。
+      if (!isIOS()) {
+        const translationDownloaded = await isTranslationModelCached();
+        models.push({
+          kind: 'translation',
+          id: 'm2m100',
+          sizeBytes: translationDownloaded ? M2M100_SPEC.approxDownloadBytes : 0,
+          downloaded: translationDownloaded,
+          inUse: s.translation.engine === 'm2m100',
+        });
+      }
+      return models;
+    },
+    async deleteModel(kind: ModelKind, id: string): Promise<{ ok: boolean; error?: string }> {
+      // 录音进行中拒绝删除（模型正被 worker/内存占用）。
+      if (asr.isRunning()) {
+        return { ok: false, error: '录音进行中，无法删除模型' };
+      }
+      try {
+        if (kind === 'asr') {
+          const spec = getAsrModel(id);
+          if (!spec || !spec.platforms.includes('web')) {
+            return { ok: false, error: '未知的识别模型' };
+          }
+          // 按文件删该模型条目（公共依赖 VAD 保留，供其他模型/下次下载复用）。
+          await deleteAsrModelFromCache(id);
+          // 常驻 worker 可能仍在内存里持有该模型：丢弃，令下次 start 重查缓存、必要时重下载。
+          await asr.dropIdleWorker();
+        } else {
+          // 翻译模型：删缓存条目并置空翻译器实例，下次翻译重新懒建（会触发重新下载）。
+          await deleteTranslationModelFromCache();
+          localTranslator = null;
+        }
         return { ok: true };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };

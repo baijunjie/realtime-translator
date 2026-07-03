@@ -5,7 +5,7 @@
 //   pnpm --filter @rt/ios gen:models
 //
 // 与 macOS 端 (apps/macos/src/main/model-downloader.ts) 消费同一份登记表，保证
-// URL/文件名/目录/校验清单不漂移。
+// URL/文件名/目录/角色/校验清单不漂移。只含 platforms 含 'ios' 的模型 + 公共依赖 Silero VAD。
 
 import Foundation
 
@@ -17,25 +17,54 @@ struct AsrModelFile {
   let filename: String
   /// 目标子目录（相对 models 根目录）。空串表示直接放在 models 根目录下。
   let dir: String
+  /// 该文件在识别器配置中的角色（model/tokens/encoder/decoder/joiner）；公共依赖 VAD 为空串。
+  let role: String
   /// 近似大小（字节），用于下载进度估算，非精确值。
   let approxBytes: Int
 }
 
+/// 一个可选用的 ASR 模型规格（对应 @rt/core 的 AsrModelSpec，已按平台过滤为仅含 iOS 支持者）。
+struct AsrModelSpec {
+  /// 注册表 id（设置 asr.model 存的就是它）。
+  let id: String
+  /// 模型文件所在子目录（相对 models 根目录）。
+  let dir: String
+  /// 识别引擎类型，供装配对应的 sherpa-onnx 识别器（iOS 目前仅 senseVoice）。
+  let engine: String
+  /// 该模型的全部需下载文件（不含公共依赖 Silero VAD）。
+  let files: [AsrModelFile]
+  /// 该模型全部文件合计近似字节。
+  let approxBytes: Int
+}
+
 enum AsrModels {
-  /// SenseVoice 多语种离线识别模型所在的子目录名（相对 models 根目录）。
-  static let senseVoiceDir = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+  /// 默认 ASR 模型 id（多语种、全平台可用）。
+  static let defaultModelId = "sense-voice"
 
-  /// 全部需下载的 ASR 模型文件，顺序：小文件先、大文件最后（带进度）。
-  static let files: [AsrModelFile] = [
-    AsrModelFile(url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx", filename: "silero_vad.onnx", dir: "", approxBytes: 2300000),
-    AsrModelFile(url: "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt", filename: "tokens.txt", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", approxBytes: 309000),
-    AsrModelFile(url: "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx", filename: "model.int8.onnx", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", approxBytes: 239000000),
+  /// Silero VAD：所有 ASR 模型共用的语音端点检测依赖，不进模型选择列表，随任一模型一并下载。
+  static let vad = AsrModelFile(url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx", filename: "silero_vad.onnx", dir: "", role: "", approxBytes: 643854)
+
+  /// iOS 支持的全部 ASR 模型规格（platforms 含 'ios'）。
+  static let models: [AsrModelSpec] = [
+    AsrModelSpec(
+      id: "sense-voice",
+      dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+      engine: "senseVoice",
+      files: [
+        AsrModelFile(url: "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx", filename: "model.int8.onnx", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", role: "model", approxBytes: 239233841),
+        AsrModelFile(url: "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt", filename: "tokens.txt", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", role: "tokens", approxBytes: 315894),
+      ],
+      approxBytes: 239549735
+    ),
   ]
 
-  /// “模型是否齐全”检查所用的相对路径清单（相对 models 根目录，POSIX 分隔符）。
-  static let requiredRelativePaths: [String] = [
-    "silero_vad.onnx",
-    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt",
-    "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx",
-  ]
+  /// 按 id 取模型规格。
+  static func model(id: String) -> AsrModelSpec? {
+    return models.first { $0.id == id }
+  }
+
+  /// 某模型的全部必需文件（公共依赖 Silero VAD + 该模型自身文件）；未知 id 仅返回 VAD。
+  static func requiredFiles(id: String) -> [AsrModelFile] {
+    return [vad] + (model(id: id)?.files ?? [])
+  }
 }

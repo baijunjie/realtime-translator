@@ -11,10 +11,19 @@
 // 注意：模型文件本身**绝不**进仓库，只在运行时按需下载 + 缓存。WASM 侧（worker）拿到这里
 // 解出的 ArrayBuffer 后，再 Module.FS.writeFile 进 MEMFS 给 sherpa 用。
 
-import { ASR_MODEL_FILES, requiredAsrFiles, type AsrModelFile } from '@rt/core';
+import { SILERO_VAD, getAsrModel, requiredAsrFiles, type AsrModelFile } from '@rt/core';
 
 /** Cache Storage 里存放 ASR 模型的缓存名（强制更新清理应用缓存时须保留）。 */
 export const ASR_MODEL_CACHE_NAME = 'realtime-translator-asr-models-v1';
+
+/**
+ * 某个 ASR 模型需下载/缓存的完整文件清单：公共依赖 Silero VAD + 该模型自身文件
+ * （URL/dir/filename/approxBytes 均取自 @rt/core 注册表）。未知 id 仅返回 VAD（防御，正常不发生）。
+ * 各文件的 cacheKey 由 dir+filename 决定（见 cacheKey），故不同模型可共存于同一缓存、互不覆盖。
+ */
+function modelFiles(modelId: string): AsrModelFile[] {
+  return [SILERO_VAD, ...(getAsrModel(modelId)?.files ?? [])];
+}
 
 // 浏览器跨源：GitHub Releases 不发 CORS 头（且 302 跳 S3），浏览器 fetch 会被拦。
 // Silero VAD 很小（~0.6MB），改为随应用同源托管在 public/models/（同源无 CORS、可即时离线）；
@@ -48,18 +57,17 @@ function cacheKey(file: AsrModelFile): string {
   return `/__realtime-translator-asr__/${rel}`;
 }
 
-/** 各文件 approxBytes 之和，作为进度分母。 */
-function totalBytes(): number {
-  return ASR_MODEL_FILES.reduce((sum, f) => sum + f.approxBytes, 0);
+/** 指定模型全部文件（含 VAD）的 approxBytes 之和，作为进度分母。 */
+function totalBytes(modelId: string): number {
+  return modelFiles(modelId).reduce((sum, f) => sum + f.approxBytes, 0);
 }
 
-/** 检查所有所需模型文件是否都已在 Cache Storage 中（用于 getSetupStatus）。 */
-export async function areModelsCached(): Promise<boolean> {
+/** 检查指定模型所需文件（含公共依赖 VAD）是否都已在 Cache Storage 中（用于 getSetupStatus）。 */
+export async function areModelsCached(modelId: string): Promise<boolean> {
   if (typeof caches === 'undefined') return false;
   try {
     const cache = await caches.open(ASR_MODEL_CACHE_NAME);
-    // requiredAsrFiles() 与 ASR_MODEL_FILES 顺序一致，这里直接按文件检查。
-    for (const file of ASR_MODEL_FILES) {
+    for (const file of modelFiles(modelId)) {
       const hit = await cache.match(cacheKey(file));
       if (!hit) return false;
     }
@@ -77,18 +85,19 @@ export async function areModelsCached(): Promise<boolean> {
  * 无需 credentialless 处理，响应也能正常进 Cache Storage。
  */
 export async function ensureModelsCached(
+  modelId: string,
   onProgress?: (p: DownloadProgress) => void,
 ): Promise<void> {
   if (typeof caches === 'undefined') {
     throw new Error('Cache Storage 不可用，无法缓存 ASR 模型');
   }
   const cache = await caches.open(ASR_MODEL_CACHE_NAME);
-  const total = totalBytes();
+  const total = totalBytes(modelId);
   // 已完成字节按「文件粒度」累计：未开始的文件实时累加其流式进度，
   // 完成/命中的文件按 approxBytes 计入 base。
   let completedBase = 0;
 
-  for (const file of ASR_MODEL_FILES) {
+  for (const file of modelFiles(modelId)) {
     const key = cacheKey(file);
     const cached = await cache.match(key);
     if (cached) {
@@ -108,16 +117,16 @@ export async function ensureModelsCached(
 }
 
 /**
- * 取出已缓存的模型字节（用于写入 WASM FS）。返回 fsName → Uint8Array 映射。
+ * 取出指定模型已缓存的字节（用于写入 WASM FS）。返回 fsName → Uint8Array 映射。
  * 若有文件缺失则抛错（调用方应先 ensureModelsCached）。
  */
-export async function readCachedModels(): Promise<Map<string, Uint8Array>> {
+export async function readCachedModels(modelId: string): Promise<Map<string, Uint8Array>> {
   if (typeof caches === 'undefined') {
     throw new Error('Cache Storage 不可用');
   }
   const cache = await caches.open(ASR_MODEL_CACHE_NAME);
   const out = new Map<string, Uint8Array>();
-  for (const file of ASR_MODEL_FILES) {
+  for (const file of modelFiles(modelId)) {
     const hit = await cache.match(cacheKey(file));
     if (!hit) {
       throw new Error(`模型文件缺失（未缓存）: ${file.filename}`);
@@ -128,9 +137,20 @@ export async function readCachedModels(): Promise<Map<string, Uint8Array>> {
   return out;
 }
 
+/**
+ * 从 Cache Storage 删除指定 ASR 模型「自身文件」的缓存条目；公共依赖 Silero VAD 保留
+ * （其他模型仍需用它，也避免整库删除误伤）。按文件逐条删除，不删整个缓存。
+ */
+export async function deleteAsrModelFromCache(modelId: string): Promise<void> {
+  if (typeof caches === 'undefined') return;
+  const cache = await caches.open(ASR_MODEL_CACHE_NAME);
+  const files = getAsrModel(modelId)?.files ?? [];
+  await Promise.all(files.map((f) => cache.delete(cacheKey(f))));
+}
+
 /** 已缓存文件的相对路径清单（与 @rt/core requiredAsrFiles 对齐，调试用）。 */
-export function modelFileList(): string[] {
-  return requiredAsrFiles();
+export function modelFileList(modelId: string): string[] {
+  return requiredAsrFiles(modelId);
 }
 
 // 无进展看门狗超时：连续这么久没收到任何新字节即判定连接停滞并中止本次下载。

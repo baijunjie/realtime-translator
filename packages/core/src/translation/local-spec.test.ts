@@ -25,13 +25,13 @@ describe('hasAllWeightFiles 缓存完整性判据', () => {
   });
 });
 
-describe('normalizeZh 简繁转换', () => {
-  it('简体 → 繁體', () => {
-    expect(normalizeZh('发现问题', 'traditional')).toBe('發現問題');
+describe('normalizeZh 简体归一化', () => {
+  it('繁体字形 → 简体', () => {
+    expect(normalizeZh('發現問題')).toBe('发现问题');
   });
 
-  it('繁體 → 简体', () => {
-    expect(normalizeZh('發現問題', 'simplified')).toBe('发现问题');
+  it('已是简体 → 原样', () => {
+    expect(normalizeZh('发现问题')).toBe('发现问题');
   });
 });
 
@@ -46,34 +46,21 @@ describe('planTranslation 判定矩阵（M2M100）', () => {
     expect(plan('ko', 'ko', '안녕하세요')).toEqual({ kind: 'skip' });
   });
 
-  it('同语言仅字形不同：script，直接产出目标字形、不经模型', () => {
-    const p = plan('zh', 'zh-Hant', '发现问题');
-    expect(p).toEqual({ kind: 'script', text: '發現問題' });
+  it('中文母语但源带繁体字形：script，直接产出简体、不经模型', () => {
+    expect(plan('zh', 'zh', '發現問題')).toEqual({ kind: 'script', text: '发现问题' });
   });
 
-  it('源已是目标字形：等价于 skip', () => {
-    expect(plan('zh', 'zh-Hant', '謝謝')).toEqual({ kind: 'skip' });
+  it('中文母语源已是简体：等价于 skip', () => {
     expect(plan('zh', 'zh', '谢谢')).toEqual({ kind: 'skip' });
   });
 
-  it('不同语言：translate，携带模型码与母语键', () => {
+  it('不同语言：translate，携带模型码与母语键；中文母语带简体归一化', () => {
     const p = plan('ja', 'zh', 'こんにちは');
     expect(p.kind).toBe('translate');
     if (p.kind === 'translate') {
       expect(p.targetCode).toBe('zh');
       expect(p.targetLang).toBe('zh');
-      // 简体母语的字形归一化
       expect(p.toScript?.('發現')).toBe('发现');
-    }
-  });
-
-  it('繁体母语：translate 的 toScript 产出繁体', () => {
-    const p = plan('en', 'zh-Hant', 'hello');
-    expect(p.kind).toBe('translate');
-    if (p.kind === 'translate') {
-      expect(p.targetCode).toBe('zh');
-      expect(p.targetLang).toBe('zh-Hant');
-      expect(p.toScript?.('发现')).toBe('發現');
     }
   });
 
@@ -91,8 +78,9 @@ describe('planTranslation 判定矩阵（M2M100）', () => {
     expect(p.kind).toBe('translate');
     if (p.kind === 'translate') {
       expect(p.targetCode).toBe('zh');
+      // 母语中文：译文按简体归一化
+      expect(p.toScript?.('發現')).toBe('发现');
     }
-    expect(plan('yue', 'zh-Hant', '早晨').kind).toBe('translate');
   });
 
   it('yue → 非中文母语：普通 translate', () => {

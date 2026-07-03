@@ -4,31 +4,82 @@
 // 对 asr-process/测试脚本暴露的公开面（TranscriptionPipeline / SAMPLE_RATE）保持不变。
 import path from 'node:path';
 import fs from 'node:fs';
-import { Vad, OfflineRecognizer } from 'sherpa-onnx-node';
+import { Vad, OfflineRecognizer, type OfflineRecognizerConfig } from 'sherpa-onnx-node';
 import {
-  SENSE_VOICE_DIR,
+  SILERO_VAD,
+  getAsrModel,
+  requiredAsrFiles,
   SAMPLE_RATE,
   VAD_WINDOW_SIZE,
   MIN_SILENCE_SECONDS,
   TranscriptionPipeline as CorePipeline,
   type AsrInferenceEngine,
   type PipelineCallbacks,
+  type AsrLang,
+  type AsrModelSpec,
+  type AsrModelFile,
 } from '@rt/core';
 
 export { SAMPLE_RATE } from '@rt/core';
 export type { PipelineCallbacks } from '@rt/core';
 
-function assertModelsExist(modelsDir: string): void {
-  const required = [
-    'silero_vad.onnx',
-    path.join(SENSE_VOICE_DIR, 'model.int8.onnx'),
-    path.join(SENSE_VOICE_DIR, 'tokens.txt'),
-  ];
-  const missing = required.filter((f) => !fs.existsSync(path.join(modelsDir, f)));
+/** 校验指定模型（含公共依赖 VAD）的全部文件存在，缺失则抛错（交由子进程上报重下载）。 */
+function assertModelsExist(modelsDir: string, modelId: string): void {
+  const missing = requiredAsrFiles(modelId).filter(
+    (f) => !fs.existsSync(path.join(modelsDir, f)),
+  );
   if (missing.length > 0) {
-    throw new Error(
-      `模型文件缺失: ${missing.join(', ')}。请重启应用以重新下载模型`
-    );
+    throw new Error(`模型文件缺失: ${missing.join(', ')}。请重启应用以重新下载模型`);
+  }
+}
+
+/** 按角色取模型文件并拼出本地绝对路径；缺该角色文件时抛错（注册表与实际文件不一致）。 */
+function fileByRole(
+  modelsDir: string,
+  spec: AsrModelSpec,
+  role: NonNullable<AsrModelFile['role']>,
+): string {
+  const f = spec.files.find((x) => x.role === role);
+  if (!f) throw new Error(`模型 ${spec.id} 缺少角色为 ${role} 的文件`);
+  return path.join(modelsDir, f.dir, f.filename);
+}
+
+/** 按注册表 engine 装配 OfflineRecognizer 的 modelConfig（各引擎的文件角色与字段不同）。 */
+function buildModelConfig(
+  modelsDir: string,
+  spec: AsrModelSpec,
+  language: AsrLang,
+): OfflineRecognizerConfig['modelConfig'] {
+  const tokens = fileByRole(modelsDir, spec, 'tokens');
+  const common = { tokens, numThreads: 2, debug: 0 } as const;
+
+  switch (spec.engine) {
+    case 'senseVoice':
+      return {
+        // language 透传：'auto' 与 zh/en/ja/ko 均为 SenseVoice 合法取值（原生校验）。
+        senseVoice: {
+          model: fileByRole(modelsDir, spec, 'model'),
+          language,
+          useInverseTextNormalization: 1,
+        },
+        ...common,
+      };
+    case 'paraformer':
+      return {
+        paraformer: { model: fileByRole(modelsDir, spec, 'model') },
+        ...common,
+      };
+    case 'transducer':
+      return {
+        transducer: {
+          encoder: fileByRole(modelsDir, spec, 'encoder'),
+          decoder: fileByRole(modelsDir, spec, 'decoder'),
+          joiner: fileByRole(modelsDir, spec, 'joiner'),
+        },
+        // NeMo transducer 需显式声明子类型；标准 zipformer transducer 无 modelType，由原生自动识别。
+        ...(spec.modelType ? { modelType: spec.modelType } : {}),
+        ...common,
+      };
   }
 }
 
@@ -36,14 +87,20 @@ export class TranscriptionPipeline {
   private readonly core: CorePipeline;
   private readonly vad: Vad;
   private readonly recognizer: OfflineRecognizer;
+  // 非 senseVoice 引擎不产语言标记，用注册表首个语言固定填充（供翻译链路当源语言）；
+  // senseVoice 为 null，改用引擎返回的 <|zh|> 标记（由 core 剥离尖括号）。
+  private readonly fixedLang: string | null;
 
-  constructor(modelsDir: string, callbacks: PipelineCallbacks) {
-    assertModelsExist(modelsDir);
+  constructor(modelsDir: string, modelId: string, language: AsrLang, callbacks: PipelineCallbacks) {
+    assertModelsExist(modelsDir, modelId);
+    const spec = getAsrModel(modelId);
+    if (!spec) throw new Error(`未知的识别模型: ${modelId}`);
+    this.fixedLang = spec.engine === 'senseVoice' ? null : spec.languages[0];
 
     this.vad = new Vad(
       {
         sileroVad: {
-          model: path.join(modelsDir, 'silero_vad.onnx'),
+          model: path.join(modelsDir, SILERO_VAD.filename),
           // 偏低的阈值让 VAD 更早进入语音状态，减少句首被截断
           threshold: 0.35,
           minSpeechDuration: 0.25,
@@ -59,15 +116,7 @@ export class TranscriptionPipeline {
 
     this.recognizer = new OfflineRecognizer({
       featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
-      modelConfig: {
-        senseVoice: {
-          model: path.join(modelsDir, SENSE_VOICE_DIR, 'model.int8.onnx'),
-          useInverseTextNormalization: 1,
-        },
-        tokens: path.join(modelsDir, SENSE_VOICE_DIR, 'tokens.txt'),
-        numThreads: 2,
-        debug: 0,
-      },
+      modelConfig: buildModelConfig(modelsDir, spec, language),
     });
 
     const engine: AsrInferenceEngine = {
@@ -84,7 +133,7 @@ export class TranscriptionPipeline {
         stream.acceptWaveform({ samples, sampleRate: SAMPLE_RATE });
         this.recognizer.decode(stream);
         const result = this.recognizer.getResult(stream);
-        return { text: result.text || '', lang: result.lang || '' };
+        return { text: result.text || '', lang: this.fixedLang ?? (result.lang || '') };
       },
     };
 

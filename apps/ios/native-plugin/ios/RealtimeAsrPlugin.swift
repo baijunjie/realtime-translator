@@ -15,8 +15,9 @@
 //  exact Xcode wiring (these are NOT auto-linked by `cap sync`).
 //
 //  Contract (must match ../definitions.ts):
-//    Methods : start(), stop(), prewarm(), getSetupStatus(), downloadModels(),
-//              getMicStatus(), openMicSettings(), getNetworkType()
+//    Methods : start({modelId,language}), stop(), prewarm({modelId,language}),
+//              getSetupStatus({modelId}), downloadModels({modelId}), listModels(),
+//              deleteModel({id}), getMicStatus(), openMicSettings()
 //    Events  : "partial"  -> { text: String }
 //              "segment"  -> { id: Int, text: String, lang: String, start: Double, duration: Double }
 //              "status"   -> { state: "loading"|"running"|"error"|"stopped", error?: String }
@@ -26,7 +27,6 @@
 import Foundation
 import AVFoundation
 import UIKit
-import Network
 import Capacitor
 
 @objc(RealtimeAsrPlugin)
@@ -40,9 +40,10 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     CAPPluginMethod(name: "prewarm", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "getSetupStatus", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "downloadModels", returnType: CAPPluginReturnPromise),
+    CAPPluginMethod(name: "listModels", returnType: CAPPluginReturnPromise),
+    CAPPluginMethod(name: "deleteModel", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "getMicStatus", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "openMicSettings", returnType: CAPPluginReturnPromise),
-    CAPPluginMethod(name: "getNetworkType", returnType: CAPPluginReturnPromise),
   ]
 
   /// Register AVAudioSession lifecycle observers once, when Capacitor loads the plugin.
@@ -57,19 +58,10 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
                        name: AVAudioSession.routeChangeNotification, object: nil)
     center.addObserver(self, selector: #selector(handleMediaServicesReset(_:)),
                        name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
-
-    // Watch the active network path so getNetworkType() can answer synchronously. The handler
-    // runs on networkQueue; it is the only writer of currentNetworkPath and reads happen on the
-    // same serial queue, keeping the cached snapshot consistent without extra locking.
-    networkMonitor.pathUpdateHandler = { [weak self] path in
-      self?.currentNetworkPath = path
-    }
-    networkMonitor.start(queue: networkQueue)
   }
 
   deinit {
     NotificationCenter.default.removeObserver(self)
-    networkMonitor.cancel()
   }
 
   // MARK: - Tunables (mirror apps/macos/src/main/pipeline.ts intent)
@@ -98,6 +90,11 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
 
   private var recognizer: SherpaOnnxOfflineRecognizer?
   private var vad: SherpaOnnxVoiceActivityDetectorWrapper?
+  /// Which model id / SenseVoice language the loaded recognizer was built for. start()/prewarm()
+  /// rebuild the recognizer when either differs, so a settings change (model or forced language)
+  /// takes effect on the next session. Both are only touched on asrQueue.
+  private var loadedModelId: String?
+  private var loadedLanguage: String?
 
   private var isRunning = false
   /// Tracks whether an input tap is currently installed on the engine's bus. installTap on a
@@ -116,19 +113,14 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   private var totalSamples = 0
   private var lastPartialAtSamples = 0
 
-  // MARK: - Network reachability (NWPathMonitor -> getNetworkType)
-
-  /// Monitors the active network path; started in load(), cancelled in deinit.
-  private let networkMonitor = NWPathMonitor()
-  /// Serial queue the monitor calls back on; also guards reads of currentNetworkPath.
-  private let networkQueue = DispatchQueue(label: "io.github.baijunjie.realtimetranslator.network")
-  /// Latest path from the monitor's handler; nil until its first callback lands.
-  private var currentNetworkPath: NWPath?
-
   // MARK: - Capacitor methods (match ../definitions.ts)
 
-  /// Start on-device ASR: ensure models loaded, request mic, open capture, begin recognition.
+  /// Start on-device ASR: ensure the requested model is loaded, request mic, open capture, begin
+  /// recognition. modelId + language come from the current settings (bridge.ts); defaults keep the
+  /// method usable when called without options.
   @objc func start(_ call: CAPPluginCall) {
+    let modelId = call.getString("modelId") ?? AsrModels.defaultModelId
+    let language = call.getString("language") ?? "auto"
     requestMicPermission { [weak self] granted in
       guard let self = self else { return }
       guard granted else {
@@ -147,13 +139,14 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
           call.resolve(["ok": true])
           return
         }
-        // Only a genuine cold start (engine still to be built) reports "loading"; after prewarm
-        // the reuse path is sub-second and flashing a model-loading hint would be misleading.
-        if self.recognizer == nil || self.vad == nil {
+        // Report "loading" only when a (re)build is actually needed — a cold start or a
+        // model/language change. After prewarm with the same model+language the reuse path is
+        // sub-second and flashing a model-loading hint would be misleading.
+        if !self.engineMatches(modelId, language) {
           self.notifyListeners("status", data: ["state": "loading"])
         }
         do {
-          try self.ensureEngineLoaded()
+          try self.ensureEngineLoaded(modelId, language: language)
           self.resetPipelineState()
           try self.startCapture()
           self.isRunning = true
@@ -190,20 +183,22 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   /// loaded. The UI disables the record button before calling; every path except an active
   /// capture session must therefore end with a terminal "stopped" status to re-enable it.
   @objc func prewarm(_ call: CAPPluginCall) {
+    let modelId = call.getString("modelId") ?? AsrModels.defaultModelId
+    let language = call.getString("language") ?? "auto"
     call.resolve()
     asrQueue.async { [weak self] in
       guard let self = self else { return }
       // Active capture session: leave the "running" state untouched.
       guard !self.isRunning else { return }
-      // Engine already loaded, or models not downloaded (the setup/download flow handles
-      // fetching): nothing to load, just release the record button.
-      guard self.recognizer == nil || self.vad == nil, self.modelsReady() else {
+      // Models not downloaded yet (the setup/download flow handles fetching), or the requested
+      // engine is already loaded: nothing to load, just release the record button.
+      guard self.modelsReady(modelId), !self.engineMatches(modelId, language) else {
         self.notifyListeners("status", data: ["state": "stopped"])
         return
       }
       self.notifyListeners("status", data: ["state": "loading"])
       do {
-        try self.ensureEngineLoaded()
+        try self.ensureEngineLoaded(modelId, language: language)
         self.notifyListeners("status", data: ["state": "stopped"])
       } catch {
         print("[prewarm] ASR engine load failed: \(error.localizedDescription)")
@@ -257,22 +252,99 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     abortCapture(reason: "audio media services were reset")
   }
 
-  /// Report whether the ASR model files are present in the writable models dir.
+  /// Report whether the requested model's files (+ shared VAD) are present in the writable dir.
   @objc func getSetupStatus(_ call: CAPPluginCall) {
-    call.resolve(["asrReady": modelsReady()])
+    let modelId = call.getString("modelId") ?? AsrModels.defaultModelId
+    call.resolve(["asrReady": modelsReady(modelId)])
   }
 
-  /// Ensure ASR models are available; download (SenseVoice + Silero VAD) on first run.
+  /// Ensure the requested model is available; download (model files + Silero VAD) on first run.
   /// Progress is reported via the "setupProgress" event; resolves when complete.
   @objc func downloadModels(_ call: CAPPluginCall) {
-    if modelsReady() {
+    let modelId = call.getString("modelId") ?? AsrModels.defaultModelId
+    if modelsReady(modelId) {
       call.resolve(["ok": true])
       return
     }
     asrQueue.async { [weak self] in
       guard let self = self else { return }
       do {
-        try self.downloadAllModels()
+        try self.downloadAllModels(modelId)
+        call.resolve(["ok": true])
+      } catch {
+        call.resolve(["ok": false, "error": error.localizedDescription])
+      }
+    }
+  }
+
+  /// List each ASR model's on-disk state: files present (VAD + model files all intact) and the
+  /// summed byte size. inUse is decided JS-side from settings, so it is not reported here.
+  @objc func listModels(_ call: CAPPluginCall) {
+    asrQueue.async { [weak self] in
+      guard let self = self else { call.resolve(["models": []]); return }
+      let root = self.modelsDir()
+      var out: [[String: Any]] = []
+      for spec in AsrModels.models {
+        var downloaded = true
+        var sizeBytes = 0
+        for file in AsrModels.requiredFiles(id: spec.id) {
+          let rel = file.dir.isEmpty ? file.filename : "\(file.dir)/\(file.filename)"
+          let path = root.appendingPathComponent(rel).path
+          if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+             let bytes = attrs[.size] as? Int {
+            sizeBytes += bytes
+            if !self.fileIsIntact(file, at: path) { downloaded = false }
+          } else {
+            downloaded = false
+          }
+        }
+        out.append(["id": spec.id, "sizeBytes": sizeBytes, "downloaded": downloaded])
+      }
+      call.resolve(["models": out])
+    }
+  }
+
+  /// Delete a downloaded ASR model. Refused while recording. Removes only the model's own files
+  /// (the shared Silero VAD is left in place); releases the recognizer if the model being deleted
+  /// is the one currently loaded, so the next start() rebuilds from disk (and finds it missing).
+  @objc func deleteModel(_ call: CAPPluginCall) {
+    guard let modelId = call.getString("id") else {
+      call.resolve(["ok": false, "error": "missing model id"])
+      return
+    }
+    asrQueue.async { [weak self] in
+      guard let self = self else { call.resolve(["ok": false, "error": "plugin released"]); return }
+      guard !self.isRunning else {
+        call.resolve(["ok": false, "error": "cannot delete a model while recording"])
+        return
+      }
+      guard let spec = AsrModels.model(id: modelId) else {
+        call.resolve(["ok": false, "error": "unknown model id: \(modelId)"])
+        return
+      }
+      // Drop the in-memory recognizer/VAD when deleting the currently loaded model.
+      if self.loadedModelId == modelId {
+        self.recognizer = nil
+        self.vad = nil
+        self.loadedModelId = nil
+        self.loadedLanguage = nil
+      }
+      let root = self.modelsDir()
+      do {
+        if spec.dir.isEmpty {
+          // Model files sit directly under models/: delete each one (never the whole root).
+          for file in spec.files {
+            let path = root.appendingPathComponent(file.filename).path
+            if FileManager.default.fileExists(atPath: path) {
+              try FileManager.default.removeItem(atPath: path)
+            }
+          }
+        } else {
+          let dir = root.appendingPathComponent(spec.dir, isDirectory: true)
+          if FileManager.default.fileExists(atPath: dir.path) {
+            try FileManager.default.removeItem(at: dir)
+          }
+        }
         call.resolve(["ok": true])
       } catch {
         call.resolve(["ok": false, "error": error.localizedDescription])
@@ -293,25 +365,6 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
       }
       call.resolve()
     }
-  }
-
-  /// Report the active connection type so the UI can warn before large downloads on cellular.
-  /// The read hops onto networkQueue to observe a consistent snapshot of the monitor's cache.
-  @objc func getNetworkType(_ call: CAPPluginCall) {
-    networkQueue.async { [weak self] in
-      guard let self = self else { call.resolve(["type": "unknown"]); return }
-      call.resolve(["type": self.classifyNetwork(self.currentNetworkPath)])
-    }
-  }
-
-  /// Map an NWPath to the JS NetworkType strings. Cellular takes priority; Wi-Fi and wired
-  /// Ethernet are both treated as "wifi" (unmetered). No cached path yet or an unsatisfied path
-  /// (e.g. offline) is "unknown", as is any other interface type.
-  private func classifyNetwork(_ path: NWPath?) -> String {
-    guard let path = path, path.status == .satisfied else { return "unknown" }
-    if path.usesInterfaceType(.cellular) { return "cellular" }
-    if path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet) { return "wifi" }
-    return "unknown"
   }
 
   // MARK: - Mic permission (iOS 17+ uses AVAudioApplication; older uses AVAudioSession)
@@ -538,23 +591,45 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
 
   // MARK: - Engine setup
 
-  private func ensureEngineLoaded() throws {
-    if recognizer != nil && vad != nil { return }
-    guard modelsReady() else {
+  /// True when the recognizer+VAD are loaded for exactly this model id and SenseVoice language.
+  /// Only touched on asrQueue (same as loadedModelId / loadedLanguage / recognizer / vad).
+  private func engineMatches(_ modelId: String, _ language: String) -> Bool {
+    return recognizer != nil && vad != nil
+      && loadedModelId == modelId && loadedLanguage == language
+  }
+
+  /// Absolute path of a model file selected by its role within a spec, or nil if absent.
+  private func filePath(root: URL, spec: AsrModelSpec, role: String) -> String? {
+    guard let file = spec.files.first(where: { $0.role == role }) else { return nil }
+    let rel = file.dir.isEmpty ? file.filename : "\(file.dir)/\(file.filename)"
+    return root.appendingPathComponent(rel).path
+  }
+
+  /// (Re)build the recognizer + VAD for the requested model id and SenseVoice language. No-op when
+  /// already loaded for the same pair; otherwise the previous recognizer is released on reassign.
+  /// iOS ships only the SenseVoice engine; other engines are rejected defensively.
+  private func ensureEngineLoaded(_ modelId: String, language: String) throws {
+    if engineMatches(modelId, language) { return }
+    guard modelsReady(modelId) else {
       throw asrError("ASR models missing; call downloadModels() first")
     }
+    guard let spec = AsrModels.model(id: modelId) else {
+      throw asrError("unknown ASR model: \(modelId)")
+    }
     let root = modelsDir()
-    let senseVoiceModel = root.appendingPathComponent(AsrModels.senseVoiceDir)
-      .appendingPathComponent("model.int8.onnx").path
-    let tokens = root.appendingPathComponent(AsrModels.senseVoiceDir)
-      .appendingPathComponent("tokens.txt").path
-    let vadModel = root.appendingPathComponent("silero_vad.onnx").path
+    guard spec.engine == "senseVoice",
+          let senseVoiceModel = filePath(root: root, spec: spec, role: "model"),
+          let tokens = filePath(root: root, spec: spec, role: "tokens") else {
+      throw asrError("unsupported ASR engine for \(modelId): \(spec.engine)")
+    }
+    let vadModel = root.appendingPathComponent(AsrModels.vad.filename).path
 
     // ---- SenseVoice offline recognizer (multilingual, ITN on). ----
+    // language is a SenseVoice-native code: auto / zh / en / ja / ko / yue ("auto" auto-detects).
     let featConfig = sherpaOnnxFeatureConfig(sampleRate: sampleRate, featureDim: 80)
     let senseVoice = sherpaOnnxOfflineSenseVoiceModelConfig(
       model: senseVoiceModel,
-      language: "",                       // auto-detect language
+      language: language,
       useInverseTextNormalization: true
     )
     let modelConfig = sherpaOnnxOfflineModelConfig(
@@ -586,6 +661,9 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     )
     vad = SherpaOnnxVoiceActivityDetectorWrapper(config: &vadConfig,
                                                  buffer_size_in_seconds: vadBufferSeconds)
+
+    loadedModelId = modelId
+    loadedLanguage = language
 
     // Warm up: ONNX's first inference does graph optimization / thread-pool / allocation
     // (can take seconds). Run it now (during "loading") so the first real utterance isn't slow.
@@ -634,10 +712,10 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   /// re-fetches it (the downloader skips files that already exist), and getSetupStatus / start
   /// see "not ready" and route to re-download / error instead of letting the sherpa-onnx wrapper
   /// fatalError on a bad model.
-  private func modelsReady() -> Bool {
+  private func modelsReady(_ modelId: String) -> Bool {
     let root = modelsDir()
     var ready = true
-    for file in AsrModels.files {
+    for file in AsrModels.requiredFiles(id: modelId) {
       let rel = file.dir.isEmpty ? file.filename : "\(file.dir)/\(file.filename)"
       let path = root.appendingPathComponent(rel).path
       if !FileManager.default.fileExists(atPath: path) {
@@ -652,14 +730,16 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     return ready
   }
 
-  /// Download every registry file (small first, big last) into the writable models dir,
-  /// reporting byte progress (dominated by the ~228MB SenseVoice int8 model).
-  private func downloadAllModels() throws {
+  /// Download the requested model's files (+ shared VAD) into the writable models dir, smallest
+  /// first so the dominant file (the ~228MB SenseVoice int8 model) finishes last and the byte
+  /// progress climbs smoothly to 100%.
+  private func downloadAllModels(_ modelId: String) throws {
     let root = modelsDir()
-    let totalBytes = AsrModels.files.reduce(0) { $0 + $1.approxBytes }
+    let files = AsrModels.requiredFiles(id: modelId).sorted { $0.approxBytes < $1.approxBytes }
+    let totalBytes = files.reduce(0) { $0 + $1.approxBytes }
     var completedBytes = 0
 
-    for file in AsrModels.files {
+    for file in files {
       let destDir = file.dir.isEmpty ? root : root.appendingPathComponent(file.dir, isDirectory: true)
       try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
       let dest = destDir.appendingPathComponent(file.filename)
@@ -677,7 +757,7 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
       completedBytes += file.approxBytes
     }
 
-    guard modelsReady() else {
+    guard modelsReady(modelId) else {
       throw asrError("ASR model verification failed after download")
     }
     notifyListeners("setupProgress", data: ["loaded": totalBytes, "total": totalBytes])

@@ -15,8 +15,8 @@
 // 实现 vs 桩：
 //  - 已实现（纯 JS，可在此环境验证类型 + 打包）：设置、归档、云翻译、事件转发、回调注册。
 //  - 依赖原生插件（此环境无 iOS 工具链，未编译/未运行）：startPipeline / stopPipeline /
-//    getMicStatus / openMicSettings / getSetupStatus / downloadAsrModels。无原生壳时
-//    （如纯浏览器预览）这些调用会 reject，桥接已做兜底，不会崩 UI。
+//    getMicStatus / openMicSettings / getSetupStatus / downloadAsrModels / listModels /
+//    deleteModel。无原生壳时（如纯浏览器预览）这些调用会 reject，桥接已做兜底，不会崩 UI。
 
 import { Preferences } from '@capacitor/preferences';
 import {
@@ -28,6 +28,8 @@ import {
   M2M100_SPEC,
   translateFinalizedSegment,
   createCallbackHub,
+  DEFAULT_ASR_MODEL_ID,
+  getAsrModel,
 } from '@rt/core';
 import type {
   AppBridge,
@@ -38,7 +40,8 @@ import type {
   CloudTranslationConfig,
   StartResult,
   MicPermission,
-  NetworkType,
+  ModelInfo,
+  ModelKind,
   SetupStatus,
   SetupProgress,
   SegmentPayload,
@@ -51,6 +54,17 @@ import { RealtimeAsr, RealtimeTranslate } from '../native-plugin';
 
 const SETTINGS_KEY = 'realtime-translator.settings';
 const ARCHIVES_KEY = 'realtime-translator.archives';
+
+// iOS 平台收敛：不支持系统音频（音源恒为麦克风）；asr.model 若不在 iOS 支持列表内则回落默认模型
+// （registry 里 platforms 不含 'ios' 的模型在本端不可用）。所有产出 settings 的路径（读/写）统一
+// 经此收口，保证 getSettings 与启动/预热热路径看到的音源与模型一致。
+function applyPlatformConstraints(s: AppSettings): AppSettings {
+  s.audioSource = 'mic';
+  if (!getAsrModel(s.asr.model)?.platforms.includes('ios')) {
+    s.asr.model = DEFAULT_ASR_MODEL_ID;
+  }
+  return s;
+}
 
 export function createIosBridge(): AppBridge {
   // —— UI 注册的回调（mountApp → registerTranscriptionListeners 时注入） ——
@@ -77,13 +91,13 @@ export function createIosBridge(): AppBridge {
         raw = null;
       }
     }
-    cachedSettings = withDefaults(raw, defaults);
+    cachedSettings = applyPlatformConstraints(withDefaults(raw, defaults));
     return cachedSettings;
   }
 
   // 写设置：补齐/校验后落盘并刷新缓存。所有写入路径（保存设置、切翻译开关）都走这里。
   async function writeSettings(next: AppSettings): Promise<AppSettings> {
-    cachedSettings = withDefaults(next, makeDefaults([]));
+    cachedSettings = applyPlatformConstraints(withDefaults(next, makeDefaults([])));
     await Preferences.set({ key: SETTINGS_KEY, value: JSON.stringify(cachedSettings) });
     return cachedSettings;
   }
@@ -142,7 +156,7 @@ export function createIosBridge(): AppBridge {
           }
           return r.text;
         }
-        // 云端传母语 app 语言键（zh-Hant 等），让 LLM 直接产出对应字形。
+        // 云端传母语 app 语言键（en/ja/ko/zh），让 LLM 直接产出母语文本。
         return new CloudTranslator(s.translation.cloud).translate(req.text, {
           source: req.source,
           target: req.targetLang,
@@ -182,24 +196,35 @@ export function createIosBridge(): AppBridge {
       : 'unknown';
   }
 
+  // 取当前 ASR 设置（模型 + 识别语言），供启动/预热透传给原生。缓存未就绪时读盘一次。
+  async function currentAsrOptions(): Promise<{ modelId: string; language: string }> {
+    const s = cachedSettings ?? (await readSettingsOnce());
+    return { modelId: s.asr.model, language: s.asr.language };
+  }
+
   const api: AppBridge = {
+    // iOS 平台标识：UI 据此按平台过滤可用模型、决定音源开关等。
+    platform: 'ios',
+    // 不声明 audioSources → UI 视为仅 ['mic']（iOS 不支持系统音频），不渲染音源开关。
     // 构建期注入的发布版本串；define 缺失的环境（如单测导入）下不暴露
     appVersion: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : undefined,
 
     // ===== ASR 管线（原生）=====
     async startPipeline(): Promise<StartResult> {
       try {
-        const r = await RealtimeAsr.start();
+        const r = await RealtimeAsr.start(await currentAsrOptions());
         return { ok: r.ok, error: r.error };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
     },
     prewarmPipeline(): void {
-      // 进主界面即后台装载 ASR 模型（不采麦、不申请权限）：fire-and-forget。
+      // 进主界面即后台装载当前 ASR 模型（不采麦、不申请权限）：fire-and-forget。
       // UI 在调用前先行禁用录音按钮、等终态 status 解禁；原生侧保证一切路径以终态收尾，
       // 调用本身 reject（纯浏览器预览无原生壳）时由这里补发 stopped，避免按钮永久禁用。
-      void RealtimeAsr.prewarm().catch(() => statusCb.emit({ state: 'stopped' }));
+      void currentAsrOptions()
+        .then((opts) => RealtimeAsr.prewarm(opts))
+        .catch(() => statusCb.emit({ state: 'stopped' }));
     },
     async stopPipeline(): Promise<{ ok: boolean }> {
       try {
@@ -220,17 +245,6 @@ export function createIosBridge(): AppBridge {
     openMicSettings(): void {
       void RealtimeAsr.openMicSettings().catch(() => undefined);
     },
-    // ===== 网络类型（原生）=====
-    // 供 UI 在下载 230MB ASR 模型前判断网络：蜂窝则弹窗确认。
-    // 无原生壳（纯浏览器预览）或调用异常时返回 'unknown'，交由 UI 决定是否照常下载。
-    async getNetworkType(): Promise<NetworkType> {
-      try {
-        const r = await RealtimeAsr.getNetworkType();
-        return r.type;
-      } catch {
-        return 'unknown';
-      }
-    },
 
     // ===== 设置（Preferences）=====
     getSettings(): Promise<AppSettings> {
@@ -250,17 +264,48 @@ export function createIosBridge(): AppBridge {
     },
 
     // ===== 首次安装 / 模型下载（原生）=====
-    async getSetupStatus(): Promise<SetupStatus> {
+    async getSetupStatus(modelId: string): Promise<SetupStatus> {
       try {
-        return await RealtimeAsr.getSetupStatus();
+        return await RealtimeAsr.getSetupStatus({ modelId });
       } catch {
         // 无原生壳（纯浏览器预览）：当作就绪，避免卡在首启引导。
         return { asrReady: true };
       }
     },
-    async downloadAsrModels(): Promise<{ ok: boolean; error?: string }> {
+    async downloadAsrModels(modelId: string): Promise<{ ok: boolean; error?: string }> {
       try {
-        return await RealtimeAsr.downloadModels();
+        return await RealtimeAsr.downloadModels({ modelId });
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+
+    // ===== 模型管理（原生）=====
+    // iOS 只有 ASR 模型可自行下载/删除；翻译走 Apple Translation（语言包由系统管理），故不返回翻译条目
+    //（模型管理页翻译分组为空则不渲染）。inUse 由此处按当前设置的 asr.model 判定，原生只给磁盘状态。
+    async listModels(): Promise<ModelInfo[]> {
+      const s = cachedSettings ?? (await readSettingsOnce());
+      try {
+        const { models } = await RealtimeAsr.listModels();
+        return models.map((m) => ({
+          kind: 'asr' as ModelKind,
+          id: m.id,
+          sizeBytes: m.sizeBytes,
+          downloaded: m.downloaded,
+          inUse: m.id === s.asr.model,
+        }));
+      } catch {
+        // 无原生壳（纯浏览器预览）：无本地模型信息可列。
+        return [];
+      }
+    },
+    async deleteModel(kind: ModelKind, id: string): Promise<{ ok: boolean; error?: string }> {
+      // 翻译语言包由系统管理，iOS 无可删的翻译模型（listModels 也不会返回翻译条目）。
+      if (kind !== 'asr') {
+        return { ok: false, error: 'no deletable translation models on iOS' };
+      }
+      try {
+        return await RealtimeAsr.deleteModel({ id });
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }

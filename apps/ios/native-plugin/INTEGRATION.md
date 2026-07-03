@@ -12,7 +12,7 @@ What was written and is ready to wire in (`apps/ios/native-plugin/ios/`):
 
 | File | Role |
 | --- | --- |
-| `RealtimeAsrPlugin.swift` | The plugin: mic capture → 16 kHz mono Float32 → Silero VAD → SenseVoice; emits `partial`/`segment`/`status`/`setupProgress`; `start`/`stop`/`prewarm`/`getSetupStatus`/`downloadModels`/`getMicStatus`/`openMicSettings`/`getNetworkType`. **Fully implemented.** |
+| `RealtimeAsrPlugin.swift` | The plugin: mic capture → 16 kHz mono Float32 → Silero VAD → SenseVoice; emits `partial`/`segment`/`status`/`setupProgress`; `start`/`stop`/`prewarm`/`getSetupStatus`/`downloadModels`/`listModels`/`deleteModel`/`getMicStatus`/`openMicSettings`. **Fully implemented.** |
 | 注册方式 | 插件实现 `CAPBridgedPlugin`（`identifier`/`jsName`/`pluginMethods`）。Capacitor 7 只自动注册 pod 插件，本插件编在 App target，故由 `ios/App/App/MainViewController.swift`（`CAPBridgeViewController` 子类）在 `capacitorDidLoad()` 调 `bridge?.registerPluginInstance(...)` 手动注册。已弃用旧的 `.m` / `CAP_PLUGIN` 宏。 |
 | `SherpaOnnx.swift` | The **official sherpa-onnx Swift wrapper**, vendored verbatim from tag `v1.13.3` (Apache-2.0). Wraps the C API as `SherpaOnnxOfflineRecognizer`, `SherpaOnnxVoiceActivityDetectorWrapper`, etc. |
 | `App-Bridging-Header.h` | ObjC→Swift bridging header; `#import "sherpa-onnx/c-api/c-api.h"` (also vendored from `v1.13.3`). |
@@ -167,9 +167,8 @@ and build in Xcode.
 
 ### First-run flow to expect
 
-1. UI calls `getSetupStatus()` → `asrReady:false` → shows the download screen (with a
-   cellular-data confirmation first when `getNetworkType()` reports cellular).
-2. `downloadAsrModels()` → plugin downloads (~230 MB), `setupProgress` drives the bar.
+1. UI calls `getSetupStatus({modelId})` → `asrReady:false` → shows the download screen.
+2. `downloadAsrModels({modelId})` → plugin downloads (~230 MB), `setupProgress` drives the bar.
 3. On entering the main screen the UI fires `prewarm()` — the engine loads in the background
    (`status:loading` → `status:stopped`), so a later start is instant.
 4. `startPipeline()` → mic permission prompt → `status:running` (a cold start without prewarm

@@ -10,7 +10,10 @@ import type {
   TranslationStatusPayload,
   StartResult,
   MicPermission,
-  NetworkType,
+  Platform,
+  AudioSource,
+  ModelInfo,
+  ModelKind,
   AppSettings,
   CloudTranslationConfig,
   SetupStatus,
@@ -27,6 +30,13 @@ import type {
  *  - iOS（Capacitor）：原生插件直接采麦，JS 侧无需送音频。
  */
 export interface AppBridge {
+  /** 运行平台标识；UI 据此按平台过滤可用模型、决定音源开关等。 */
+  platform: Platform;
+  /**
+   * 本平台支持的音频采集来源；缺省视为 `['mic']`。
+   * UI 仅当其中含 `'system'` 时才渲染「系统音频 / 麦克风」音源开关。
+   */
+  audioSources?: readonly AudioSource[];
   /** 开始整个实时会话（含音频采集） */
   startPipeline(): Promise<StartResult>;
   /**
@@ -51,12 +61,6 @@ export interface AppBridge {
   appVersion?: string;
   /** 查询麦克风权限状态（用于在请求权限前先弹说明） */
   getMicStatus(): Promise<MicPermission>;
-  /**
-   * 查询当前网络连接类型，用于蜂窝网络下下载模型（ASR / 本地翻译）前的确认。
-   * 仅 iOS 原生（NWPathMonitor）与部分浏览器（Network Information API）能判断；
-   * 方法缺省或返回 unknown 时，UI 不弹蜂窝确认、维持现状直接下载。macOS 不实现。
-   */
-  getNetworkType?(): Promise<NetworkType>;
   /** 打开系统设置的麦克风隐私页（macOS） */
   openMicSettings(): void;
   getSettings(): Promise<AppSettings>;
@@ -73,10 +77,14 @@ export interface AppBridge {
    * UI 仅在本方法存在时才在主屏幕菜单显示「强制更新」入口，原生端（macOS/iOS）无需实现。
    */
   forceUpdateApp?(): Promise<void>;
-  /** 首次启动：查询 ASR 模型是否已就绪 */
-  getSetupStatus(): Promise<SetupStatus>;
-  /** 下载 ASR 模型，返回结果（失败带 error，供重试） */
-  downloadAsrModels(): Promise<{ ok: boolean; error?: string }>;
+  /** 查询指定 ASR 模型（含公共依赖 VAD）是否已就绪 */
+  getSetupStatus(modelId: string): Promise<SetupStatus>;
+  /** 下载指定 ASR 模型（含公共依赖 VAD），返回结果（失败带 error，供重试） */
+  downloadAsrModels(modelId: string): Promise<{ ok: boolean; error?: string }>;
+  /** 列出本地各模型（ASR / 翻译）的占用与状态，供模型管理页展示 */
+  listModels(): Promise<ModelInfo[]>;
+  /** 删除某个已下载模型，返回结果（失败带 error） */
+  deleteModel(kind: ModelKind, id: string): Promise<{ ok: boolean; error?: string }>;
   /**
    * 本地翻译模型是否已下载到本地缓存。仅当平台需要自行下载本地翻译模型时提供
    * （macOS / Web 的 M2M100）；缺省表示无需下载（如 iOS 走系统翻译，语言包由系统管理）。

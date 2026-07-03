@@ -9,7 +9,6 @@ const REQUEST_TIMEOUT_MS = 30_000;
 
 const LANG_NAMES: Record<string, string> = {
   zh: 'Chinese (Simplified)',
-  'zh-Hant': 'Chinese (Traditional)',
   ja: 'Japanese',
   en: 'English',
   ko: 'Korean',

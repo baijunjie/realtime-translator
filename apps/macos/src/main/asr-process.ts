@@ -19,7 +19,7 @@ parentPort.on('message', (e: { data: MainToAsr }) => {
     switch (msg.type) {
       case 'init':
         // 构造里会加载模型并预热（冷启动开销发生在这里，主进程不受影响）
-        pipeline = new TranscriptionPipeline(msg.modelsDir, {
+        pipeline = new TranscriptionPipeline(msg.modelsDir, msg.modelId, msg.language, {
           onSegment: (payload) => post({ type: 'segment', payload }),
           onPartial: (payload) => post({ type: 'partial', payload }),
         });
