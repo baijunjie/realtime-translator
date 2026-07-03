@@ -48,6 +48,13 @@ watch(show, (v) => {
 
 const totalBytes = computed(() => props.tasks.reduce((sum, task) => sum + task.sizeBytes, 0));
 
+// 弹窗标题随阶段切换：确认征询 / 下载进行中 / 失败
+const modalTitle = computed(() => {
+  if (phase.value === 'downloading') return t('download.titleDownloading');
+  if (phase.value === 'error') return t('download.titleFailed');
+  return t('download.title');
+});
+
 const currentTask = computed<DownloadTask | undefined>(() => props.tasks[current.value]);
 const isTranslation = computed(() => currentTask.value?.kind === 'translation');
 
@@ -122,7 +129,7 @@ function onCancel(): void {
   <n-modal
     v-model:show="show"
     preset="card"
-    :title="t('download.title')"
+    :title="modalTitle"
     style="width: 460px; max-width: 90vw"
     :closable="false"
     :mask-closable="false"

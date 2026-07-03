@@ -22,6 +22,8 @@ const messages = {
       start: 'Download',
       step: 'Item {n} of {total}',
       title: 'Download required models',
+      titleDownloading: 'Downloading models',
+      titleFailed: 'Model download failed',
       total: 'Total',
     },
     errors: {
@@ -146,6 +148,8 @@ const messages = {
       start: 'ダウンロード',
       step: '{total} 件中 {n} 件目',
       title: 'モデルのダウンロードが必要です',
+      titleDownloading: 'モデルをダウンロード中',
+      titleFailed: 'モデルのダウンロードに失敗しました',
       total: '合計',
     },
     errors: {
@@ -269,6 +273,8 @@ const messages = {
       start: '다운로드',
       step: '{total}개 중 {n}번째',
       title: '모델 다운로드가 필요합니다',
+      titleDownloading: '모델 다운로드 중',
+      titleFailed: '모델 다운로드 실패',
       total: '합계',
     },
     errors: {
@@ -390,6 +396,8 @@ const messages = {
       start: '开始下载',
       step: '第 {n}/{total} 项',
       title: '需要下载模型',
+      titleDownloading: '正在下载模型',
+      titleFailed: '模型下载失败',
       total: '合计',
     },
     errors: {
