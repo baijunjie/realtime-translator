@@ -103,6 +103,9 @@ const loadingSummary = computed(() =>
   loadingItems.value.length > 1 ? t('status.preparing') : (loadingItems.value[0] ?? ''),
 );
 
+// 录音进行中（含启停在途）：顶栏除录音按钮外全部禁用，避免录音过程中误操作打断会话
+const headerLocked = computed(() => recording.value || recordBusy.value);
+
 // 音源开关：仅当桥接声明支持系统音频时才显示（macOS）。切换即持久化。
 const supportsSystemAudio = bridge().audioSources?.includes('system') ?? false;
 const audioSourceTitle = computed(() =>
@@ -110,7 +113,7 @@ const audioSourceTitle = computed(() =>
 );
 function toggleAudioSource(): void {
   const s = settings.value;
-  if (!s || recording.value || recordBusy.value) return;
+  if (!s || headerLocked.value) return;
   void saveSettings({ ...s, audioSource: s.audioSource === 'system' ? 'mic' : 'system' });
 }
 
@@ -122,7 +125,7 @@ const mobileMenuOptions = computed<DropdownMixedOption[]>(() => [
           key: 'audio-source',
           label: audioSourceTitle.value,
           icon: () => h(settings.value?.audioSource === 'system' ? MonitorSpeaker : Mic, { size: 16 }),
-          disabled: recording.value || recordBusy.value,
+          disabled: headerLocked.value,
         },
         { type: 'divider', key: 'd0' },
       ] satisfies DropdownMixedOption[])
@@ -290,8 +293,8 @@ function openMicSettings(): void {
 
       <!-- 窄屏隐藏，改用下方「...」菜单与底部圆形录音按钮 -->
       <div class="flex items-center gap-3.5 max-sm:hidden">
-        <!-- NDropdown 无 disabled 属性：无内容时直接渲染禁用按钮，避免空状态仍能弹出菜单 -->
-        <n-dropdown v-if="hasContent" trigger="click" :options="clearOptions" @select="onClearSelect">
+        <!-- NDropdown 无 disabled 属性：无内容或录音锁定时直接渲染禁用按钮，避免仍能弹出菜单 -->
+        <n-dropdown v-if="hasContent && !headerLocked" trigger="click" :options="clearOptions" @select="onClearSelect">
           <n-tooltip>
             <template #trigger>
               <n-button quaternary circle :aria-label="t('main.clear')">
@@ -311,7 +314,7 @@ function openMicSettings(): void {
         </n-tooltip>
         <n-tooltip>
           <template #trigger>
-            <n-button quaternary circle :aria-label="t('main.viewArchives')" @click="$emit('open-archive')">
+            <n-button quaternary circle :disabled="headerLocked" :aria-label="t('main.viewArchives')" @click="$emit('open-archive')">
               <template #icon><Library :size="18" /></template>
             </n-button>
           </template>
@@ -319,7 +322,7 @@ function openMicSettings(): void {
         </n-tooltip>
         <n-tooltip>
           <template #trigger>
-            <n-button quaternary circle :aria-label="t('main.settings')" @click="$emit('open-settings')">
+            <n-button quaternary circle :disabled="headerLocked" :aria-label="t('main.settings')" @click="$emit('open-settings')">
               <template #icon><Settings :size="18" /></template>
             </n-button>
           </template>
@@ -331,7 +334,7 @@ function openMicSettings(): void {
             <n-button
               quaternary
               circle
-              :disabled="recording || recordBusy"
+              :disabled="headerLocked"
               :aria-label="audioSourceTitle"
               @click="toggleAudioSource"
             >
@@ -355,7 +358,9 @@ function openMicSettings(): void {
       <!-- sm:hidden 放在外层 div：Naive 运行时注入的 .n-button{display:inline-flex} 会盖过
            直接加在按钮上的 sm:hidden，故由普通 div 承载响应式隐藏（桌面 ≥640px 隐藏整组）。 -->
       <div class="sm:hidden">
+        <!-- NDropdown 无 disabled 属性：录音锁定时直接渲染禁用按钮，避免仍能弹出菜单 -->
         <n-dropdown
+          v-if="!headerLocked"
           trigger="click"
           placement="bottom-end"
           :options="mobileMenuOptions"
@@ -370,6 +375,14 @@ function openMicSettings(): void {
             {{ t('main.menu') }}
           </n-tooltip>
         </n-dropdown>
+        <n-tooltip v-else>
+          <template #trigger>
+            <n-button quaternary circle disabled :aria-label="t('main.menu')">
+              <template #icon><MoreHorizontal :size="20" /></template>
+            </n-button>
+          </template>
+          {{ t('main.menu') }}
+        </n-tooltip>
       </div>
     </header>
 
