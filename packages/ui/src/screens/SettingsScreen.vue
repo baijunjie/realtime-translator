@@ -3,7 +3,7 @@ import { reactive, ref, watch } from 'vue';
 import { NButton, NTooltip } from 'naive-ui';
 import { ArrowLeft, SlidersHorizontal, Mic, Languages, HardDrive } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
-import { M2M100_SPEC } from '@rt/core';
+import { M2M100_SPEC, getAsrModel } from '@rt/core';
 import { settings, saveSettings } from '../composables/useSettings';
 import { bridge } from '../bridge';
 import type { SettingsFormData } from '../components/settings/form';
@@ -93,8 +93,16 @@ watch(
   { deep: true },
 );
 
-// 切到本地翻译引擎时按需弹下载弹窗。先 await 保存链，确保本次 engine 变更已落盘再查就绪状态，
-// 避免与保存竞态（保存通道 a 的 watch 声明在前，此处 await 到的正是那次保存）。
+// 选择即触发下载确认（识别模型 / 本地翻译引擎一致）：设置值本身已经保存通道 a 落盘，
+// 弹窗只负责「顺手下载」；取消不回退任何设置，缺失的模型留到点击录音时再按需下载。
+// 打开前先 await 保存链，确保本次变更已落盘再查就绪状态（保存通道 a 的 watch 声明在前，
+// await 到的正是那次保存）；弹窗已在展示（含下载中）时不打断、不覆盖任务。
+function offerDownload(tasks: DownloadTask[]): void {
+  if (downloadModalOpen.value || tasks.length === 0) return;
+  downloadTasks.value = tasks;
+  downloadModalOpen.value = true;
+}
+
 watch(
   () => form.engine,
   async (engine, prev) => {
@@ -105,26 +113,38 @@ watch(
       try {
         const { ready } = await getStatus();
         if (!ready) {
-          downloadTasks.value = [
+          offerDownload([
             { kind: 'translation', nameKey: 'models.m2m100', sizeBytes: M2M100_SPEC.approxDownloadBytes },
-          ];
-          downloadModalOpen.value = true;
+          ]);
         }
       } catch {
-        /* 查询失败：不弹窗；缺模型会在首次录音触发按需下载 */
+        /* 查询失败：不弹窗；缺模型会在点击录音时按需下载 */
       }
     }
   },
 );
 
-// 下载完成 → 设置已生效，仅关闭弹窗（不离开设置页）
+watch(
+  () => form.asr.model,
+  async (modelId) => {
+    await saveChain;
+    try {
+      const { asrReady } = await bridge().getSetupStatus(modelId);
+      if (asrReady) return;
+      const spec = getAsrModel(modelId);
+      if (!spec) return;
+      offerDownload([
+        { kind: 'asr', modelId: spec.id, nameKey: spec.nameKey, sizeBytes: spec.approxBytes },
+      ]);
+    } catch {
+      /* 查询失败：不弹窗；缺模型会在点击录音时按需下载 */
+    }
+  },
+);
+
+// 下载完成 → 仅关闭弹窗（设置早已生效，不离开设置页）
 function onDownloadDone(): void {
   downloadModalOpen.value = false;
-}
-
-// 取消下载即「不开启本地翻译」：把翻译方式置回「无」，经保存通道 a 落盘为 translation.enabled=false。
-function onDownloadCancel(): void {
-  form.engine = 'none';
 }
 </script>
 
@@ -191,12 +211,12 @@ function onDownloadCancel(): void {
       </div>
     </div>
 
-    <!-- 本地翻译模型就地下载：done 仅关闭弹窗，cancel 回退翻译方式为「无」 -->
+    <!-- 选择识别模型/本地翻译引擎时的就地下载：done 仅关闭弹窗；
+         cancel 不回退设置（值已落盘），缺失模型留到点击录音时再按需下载 -->
     <model-download-modal
       v-model:show="downloadModalOpen"
       :tasks="downloadTasks"
       @done="onDownloadDone"
-      @cancel="onDownloadCancel"
     />
   </div>
 </template>
