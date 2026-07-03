@@ -8,19 +8,16 @@ description: 发布/重发 Realtime Translator 的 release（macOS dmg + web 自
 本仓库的发布物有两个，**一次 push 会同时影响两者**：
 
 - **macOS dmg**：手动打包后上传到 GitHub Release 资产。
-- **Web PWA**：push 到 `main` 即由 `.github/workflows/deploy-web.yml` 自动部署到 GitHub Pages——发 macOS 版前确认 main 上没有「不想同时上线 web」的改动。
+- **Web PWA**：push 到 `main` 后由 `.github/workflows/ci.yml` 的 `deploy-web` job 部署到 GitHub Pages，**且仅在 check job 全绿后执行**（坏代码进不了线上）。发 macOS 版前仍需确认 main 上没有「不想同时上线 web」的改动。
 
 ## 1. 发布前检查（必须全绿才继续）
 
 ```bash
 git status --porcelain          # 工作树必须干净
-pnpm --filter @rt/core test
-pnpm --filter @rt/macos type-check
-pnpm --filter @rt/web type-check
-pnpm --filter @rt/ios type-check
+pnpm check                      # core 测试 + 三端 type-check（与 CI 的 check job 完全一致）
 ```
 
-以上与 CI（`.github/workflows/ci.yml`）完全一致，本地过了 push 后 CI 必绿。
+本地过了，push 后 CI 必绿、web 部署才会放行。
 
 ## 2. 版本号
 

@@ -1,17 +1,23 @@
-# 质量门禁：core 单元测试 + 三端 type-check。
-# 不下载 Electron 二进制（ELECTRON_SKIP_BINARY_DOWNLOAD=1）：类型检查只需要包内的
-# TS 类型声明，跳过 ~100MB 下载让 CI 更快、更稳。
+# 质量门禁 + Web 部署（同一工作流的依赖链：check 全绿才部署）。
+# - check：core 单元测试 + 三端 type-check。不下载 Electron 二进制
+#   （ELECTRON_SKIP_BINARY_DOWNLOAD=1）：类型检查只需要包内的 TS 类型声明。
+# - deploy-web：仅 main 分支 push（或手动触发）且 check 通过后，构建 apps/web
+#   并部署到 GitHub Pages——坏代码进不了线上 PWA。
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch: {} # 手动触发（含部署），合并到 main 前先验证用
 
 # 同一分支/PR 只保留最新一次运行，新触发取消进行中的。
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -43,3 +49,51 @@ jobs:
 
       - name: Type-check (@rt/ios)
         run: pnpm --filter @rt/ios type-check
+
+  # 构建 apps/web（浏览器 PWA）并部署到 GitHub Pages。
+  # Pages 项目站点服务于 https://<user>.github.io/<repo>/，故 base 设为 /<repo>/。
+  # 仓库 Settings → Pages → Build and deployment → Source 需选「GitHub Actions」。
+  deploy-web:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    # 同一时刻只跑一个部署，新触发取消进行中的。
+    concurrency:
+      group: pages
+      cancel-in-progress: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # 只装 @rt/web 子图（@rt/core / @rt/ui + 其依赖），跳过 macOS/iOS 的 electron 等重依赖。
+      - run: pnpm install --frozen-lockfile --filter "@rt/web..."
+
+      - name: Build (base = /<repo>/)
+        run: pnpm --filter @rt/web build
+        env:
+          # GitHub Pages 项目站点的子路径；与仓库名一致。
+          BASE_PATH: /${{ github.event.repository.name }}/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
