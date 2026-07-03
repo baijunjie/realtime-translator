@@ -1,11 +1,11 @@
 // ASR 模型存取（浏览器端）。
 //
-// 职责：把 @rt/core 的 ASR_MODELS（Silero VAD + SenseVoice tokens/model.int8.onnx，合计 ~230MB）
+// 职责：把 @rt/core 注册表里指定 modelId 的文件（公共依赖 Silero VAD + 该模型自身文件）
 // 从 HuggingFace / GitHub Release 拉下来，缓存进 Cache Storage（首次下载后离线可复用），
 // 并以「已下载字节 / 总字节」的形式回吐聚合进度（透传给 bridge 的 setupProgressCb）。
 //
 // 为什么用 Cache Storage 而非 IndexedDB：
-//  - 单文件 ~228MB，Cache Storage 以 Response（流）为单位存储大二进制最自然、内存占用低；
+//  - 权重个体文件可达数百 MB，Cache Storage 以 Response（流）为单位存储大二进制最自然、内存占用低；
 //  - 与 PWA/Service Worker 的缓存模型一致，可被显式管理（caches.open/match/put/delete）。
 //
 // 注意：模型文件本身**绝不**进仓库，只在运行时按需下载 + 缓存。WASM 侧（worker）拿到这里
@@ -27,7 +27,7 @@ function modelFiles(modelId: string): AsrModelFile[] {
 
 // 浏览器跨源：GitHub Releases 不发 CORS 头（且 302 跳 S3），浏览器 fetch 会被拦。
 // Silero VAD 很小（~0.6MB），改为随应用同源托管在 public/models/（同源无 CORS、可即时离线）；
-// SenseVoice 仍从 HuggingFace 拉（HF 带 Access-Control-Allow-Origin，浏览器可跨源取）。
+// 各模型权重仍从 HuggingFace 拉（HF 带 Access-Control-Allow-Origin，浏览器可跨源取）。
 const SAME_ORIGIN_BUNDLED: Record<string, string> = {
   'silero_vad.onnx': `${import.meta.env.BASE_URL}models/silero_vad.onnx`,
 };

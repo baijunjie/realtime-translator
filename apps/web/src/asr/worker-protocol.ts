@@ -5,12 +5,14 @@ import type { AsrLang } from '@rt/core';
 
 /** 主线程 → Worker。 */
 export type ToWorker =
-  // 初始化：传入已下载好的模型字节（fsName → bytes），Worker 写入 WASM FS 并建 VAD/recognizer；
-  // language 为 SenseVoice 识别语言（'auto' 或 zh/en/ja/ko）。
+  // 初始化：传入已下载好的模型字节（fsName → bytes），Worker 写入 WASM FS 并建 VAD/recognizer。
+  // modelId 指向 @rt/core 注册表条目，Worker 据其 engine/modelType/files.role 装配对应识别器；
+  // language 仅对 senseVoice 生效（'auto' 或 zh/en/ja/ko），专用引擎的段语言由注册表首个语言固定填充。
   | {
       type: 'init';
       models: Array<{ name: string; bytes: Uint8Array }>;
       sherpaBaseUrl: string;
+      modelId: string;
       language: AsrLang;
     }
   // 一帧 16kHz 单声道 PCM（Float32）。

@@ -11,18 +11,27 @@
 // fetch + 间接 eval 在全局作用域执行，并在 eval 末尾把所需符号显式挂到 self
 // （兼容 function/class/const 任意声明形式）。
 //
-// 运行模型：Silero VAD（512 采样窗口@16k）+ SenseVoice 离线识别（int8）。
+// 运行模型：Silero VAD（512 采样窗口@16k）+ 一个离线识别器。识别器按 init 传入的
+// modelId 查 @rt/core 注册表，据其 engine 装配 senseVoice / paraformer / transducer
+// 三类配置（transducer 的 NeMo 子类型经 modelType 声明），与 macOS 装配路径同构。
 // 单线程 WASM 构建 → 无需 COOP/COEP。模型由主线程下载/缓存后以字节数组传进来。
 // worker 跨录音会话复用（stop 只 flush 不销毁）：模型常驻 MEMFS，再次开始录音
-// 只需 reset 计时基线，免去重读 ~230MB 模型与重新构图预热。
+// 只需 reset 计时基线，免去重读模型字节与重新构图预热。切换识别模型（字节不同）
+// 则由主线程终止本 worker 冷启动重建，不走原地重建。
 //
 // 用 ts-nocheck 避开 Worker 全局 + 动态注入的 sherpa 全局（Module/createVad/
 // OfflineRecognizer）之间的类型冲突。协议字段见 ./worker-protocol.ts。
 // @ts-nocheck
 /// <reference lib="webworker" />
-import { TranscriptionPipeline, SAMPLE_RATE, VAD_WINDOW_SIZE, MIN_SILENCE_SECONDS } from '@rt/core';
+import {
+  TranscriptionPipeline,
+  SAMPLE_RATE,
+  VAD_WINDOW_SIZE,
+  MIN_SILENCE_SECONDS,
+  getAsrModel,
+} from '@rt/core';
 
-// SenseVoice VAD 参数（句首不截断：偏低阈值更早进入语音态）。
+// VAD 参数（句首不截断：偏低阈值更早进入语音态）。
 const VAD_THRESHOLD = 0.35;
 const VAD_MIN_SPEECH = 0.25;
 
@@ -30,6 +39,11 @@ let vad = null;
 let recognizer = null;
 let pipeline = null;
 let frameQueue = []; // init 完成前先暂存帧
+// 当前识别模型规格（@rt/core 注册表条目）。reconfigure 重建 recognizer 时复用（模型不变）。
+let spec = null;
+// 非 senseVoice 引擎不产语言标记：用注册表首个语言固定填充段语言（供翻译链路当源语言）；
+// senseVoice 为 null，改用识别结果里的 <|zh|> 标记（由 core 剥离尖括号）。
+let fixedLang = null;
 // 当前 recognizer 所用的识别语言（'auto' / zh / en / ja / ko）。语言变化时据此判断是否需重建。
 let currentLanguage = 'auto';
 
@@ -37,24 +51,54 @@ function post(msg) {
   self.postMessage(msg);
 }
 
-/**
- * 按识别语言建 SenseVoice 离线识别器（tokens.txt 与 model.int8.onnx 已在 WASM FS，扁平名）。
- * language 透传给原生：'auto' 与 zh/en/ja/ko 均为 SenseVoice 合法取值（原生校验）。
- */
+/** 按角色取该模型文件的 WASM FS 引用（扁平文件名，写入时即用 filename）；缺该角色文件时抛错。 */
+function fileByRole(role) {
+  const f = spec.files.find((x) => x.role === role);
+  if (!f) throw new Error(`模型 ${spec.id} 缺少角色为 ${role} 的文件`);
+  return `./${f.filename}`;
+}
+
+/** 按注册表 engine 装配 OfflineRecognizer 的 modelConfig（各引擎的文件角色与字段不同）。 */
+function buildModelConfig(language) {
+  const common = { tokens: fileByRole('tokens'), numThreads: 1, debug: 0 };
+  switch (spec.engine) {
+    case 'senseVoice':
+      return {
+        // language 透传：'auto' 与 zh/en/ja/ko 均为 SenseVoice 合法取值（原生校验）。
+        senseVoice: {
+          model: fileByRole('model'),
+          language: language || 'auto',
+          useInverseTextNormalization: 1,
+        },
+        ...common,
+      };
+    case 'paraformer':
+      return {
+        paraformer: { model: fileByRole('model') },
+        ...common,
+      };
+    case 'transducer':
+      return {
+        transducer: {
+          encoder: fileByRole('encoder'),
+          decoder: fileByRole('decoder'),
+          joiner: fileByRole('joiner'),
+        },
+        // NeMo transducer 需显式声明子类型；标准 zipformer transducer 无 modelType，由原生自动识别。
+        ...(spec.modelType ? { modelType: spec.modelType } : {}),
+        ...common,
+      };
+    default:
+      throw new Error(`不支持的识别引擎: ${spec.engine}`);
+  }
+}
+
+/** 按当前模型规格 + 识别语言建离线识别器（模型文件已在 WASM FS，扁平名）。 */
 function buildRecognizer(language) {
   return new self.OfflineRecognizer(
     {
       featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
-      modelConfig: {
-        senseVoice: {
-          model: './model.int8.onnx',
-          language: language || 'auto',
-          useInverseTextNormalization: 1,
-        },
-        tokens: './tokens.txt',
-        numThreads: 1,
-        debug: 0,
-      },
+      modelConfig: buildModelConfig(language),
     },
     self.Module,
   );
@@ -116,6 +160,11 @@ async function loadGlue(baseUrl) {
 // ===== init：加载 WASM 胶水 + 写入模型 + 建引擎与管线 =====
 async function handleInit(msg) {
   try {
+    // 查注册表定位模型规格：engine/modelType/files.role 决定识别器装配方式。
+    spec = getAsrModel(msg.modelId);
+    if (!spec) throw new Error(`未知的识别模型: ${msg.modelId}`);
+    fixedLang = spec.engine === 'senseVoice' ? null : spec.languages[0];
+
     const M = await loadGlue(msg.sherpaBaseUrl);
     // 把模型字节写入 WASM MEMFS（扁平文件名，recognizer/VAD 用 './<name>' 引用）。
     for (const { name, bytes } of msg.models) {
@@ -139,7 +188,7 @@ async function handleInit(msg) {
       bufferSizeInSeconds: 120,
     });
 
-    // SenseVoice 离线识别。识别语言由 init 消息带入（缺省 'auto'）。
+    // 离线识别器（引擎按 spec 装配）。识别语言由 init 消息带入（缺省 'auto'，仅 senseVoice 消费）。
     currentLanguage = msg.language || 'auto';
     recognizer = buildRecognizer(currentLanguage);
 
@@ -160,7 +209,8 @@ async function handleInit(msg) {
         recognizer.decode(stream);
         const result = recognizer.getResult(stream);
         stream.free();
-        return { text: result.text || '', lang: result.lang || '' };
+        // senseVoice 用结果自带语言标记；专用引擎无标记，用注册表首个语言固定填充。
+        return { text: result.text || '', lang: fixedLang ?? (result.lang || '') };
       },
     };
 
@@ -214,7 +264,8 @@ self.onmessage = (ev) => {
       pipeline?.reset();
       break;
     case 'reconfigure':
-      // 识别语言变化：模型字节仍在 WASM FS，仅重建 recognizer（免重下/重读 ~230MB）。
+      // 识别语言变化（模型不变）：模型字节仍在 WASM FS，仅按新语言重建 recognizer（免重下/重读模型）。
+      // 模型切换不走这里——字节不同，由主线程冷启动重建整个 worker。
       // 先建新的、成功后再释放旧的：buildRecognizer 抛错时旧 recognizer 仍完好可用。
       // 失败经 'reconfigured' 的 error 字段回报（不发全局引擎错误——引擎其实仍在），
       // 由主线程冷启动重建。

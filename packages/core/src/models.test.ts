@@ -40,10 +40,22 @@ describe('asrModelsFor', () => {
     expect(ids).toContain('zipformer-ja-reazonspeech');
   });
 
-  it('web / ios 平台仅 sense-voice', () => {
-    expect(asrModelsFor('zh', 'web').map((m) => m.id)).toEqual(['sense-voice']);
-    expect(asrModelsFor('ja', 'web').map((m) => m.id)).toEqual(['sense-voice']);
+  it('web 平台含专用模型（sense-voice + 各语言专用）', () => {
+    expect(asrModelsFor('zh', 'web').map((m) => m.id)).toEqual(['sense-voice', 'paraformer-zh']);
+    expect(asrModelsFor('ja', 'web').map((m) => m.id)).toEqual([
+      'sense-voice',
+      'zipformer-ja-reazonspeech',
+    ]);
+    expect(asrModelsFor('en', 'web').map((m) => m.id)).toEqual([
+      'sense-voice',
+      'parakeet-tdt-0.6b-v2-en',
+    ]);
+  });
+
+  it('ios 平台仅 sense-voice', () => {
     expect(asrModelsFor('zh', 'ios').map((m) => m.id)).toEqual(['sense-voice']);
+    expect(asrModelsFor('ja', 'ios').map((m) => m.id)).toEqual(['sense-voice']);
+    expect(asrModelsFor('en', 'ios').map((m) => m.id)).toEqual(['sense-voice']);
   });
 });
 

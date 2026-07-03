@@ -1,7 +1,7 @@
 // Web ASR 执行层。
 //
 // 这是桥接 (../bridge.ts) 调用的统一接口：start() 起一条「采麦 → 16kHz 单声道 PCM → sherpa-onnx
-// WASM（Silero VAD + SenseVoice）」的实时识别管线，stop() 拆除音频通路。
+// WASM（Silero VAD + 按 modelId 选定的离线识别器）」的实时识别管线，stop() 拆除音频通路。
 //
 // 架构：
 //  - 采麦：getUserMedia + AudioContext(16k) + AudioWorklet（见 ./pcm-worklet.js），每 100ms 一帧。
@@ -26,7 +26,7 @@ import { DEFAULT_ASR_MODEL_ID } from '@rt/core';
 import { areModelsCached, ensureModelsCached, readCachedModels } from './model-store';
 import type { ToWorker, FromWorker } from './worker-protocol';
 
-// sherpa-onnx / SenseVoice 期望的采样率（与 @rt/core 模型一致）。
+// sherpa-onnx 离线识别期望的采样率（与 @rt/core 各模型一致）。
 const SAMPLE_RATE = 16000;
 
 export interface WebAsrCallbacks {
@@ -64,11 +64,13 @@ export class WebAsr {
   private workerFailed = false;
   private running = false;
 
-  // 当前生效的识别配置（web 平台仅 sense-voice，故 modelId 恒为默认；language 可变）。
+  // 当前生效的识别配置（modelId 指向 @rt/core 注册表条目，language 为识别语言）。
   // 桥接层在 start/prewarm 前按最新设置注入。
   private config: WebAsrConfig = { modelId: DEFAULT_ASR_MODEL_ID, language: 'auto' };
-  // 常驻 worker 内 recognizer 当前所用的识别语言；与 config.language 不一致时需重建。
+  // 常驻 worker 内 recognizer 当前所用的识别语言；与 config.language 不一致时（同模型）走轻量重建。
   private workerLanguage: AsrLang | null = null;
+  // 常驻 worker 已装载的模型 id；与 config.modelId 不一致时须冷启动重建（模型字节不同，原地重建不适用）。
+  private workerModelId: string | null = null;
 
   // start/stop/prewarm 单飞串行：三类操作一律入队到同一条链尾逐次执行——调用顺序即生效顺序，
   // 「最后一次意图」必然最后生效。internal 各自幂等（start 遇 running 短路、worker 复用、stop 幂等），
@@ -107,6 +109,7 @@ export class WebAsr {
     this.workerReady = false;
     this.workerFailed = false;
     this.workerLanguage = null;
+    this.workerModelId = null;
   }
 
   /** 冷启动识别 Worker：等模型缓存就绪 → 取字节 → 建 Worker → init（写 FS + 建 VAD/recognizer）。 */
@@ -124,7 +127,8 @@ export class WebAsr {
       type: 'module',
     });
 
-    // 快照本次 init 的识别语言：ready 回执到达时据此登记 workerLanguage（避免期间 config 改动串味）。
+    // 快照本次 init 的模型 id 与识别语言：ready 回执到达时据此登记（避免期间 config 改动串味）。
+    const initModelId = modelId;
     const initLanguage = this.config.language;
 
     const ready = new Promise<void>((resolve, reject) => {
@@ -134,7 +138,8 @@ export class WebAsr {
         switch (msg.type) {
           case 'ready':
             this.workerReady = true;
-            // 记录 worker 内 recognizer 实际生效的识别语言（init 时用的 config.language）。
+            // 记录 worker 内 recognizer 实际生效的模型与识别语言（init 时用的 config）。
+            this.workerModelId = initModelId;
             this.workerLanguage = initLanguage;
             resolve();
             break;
@@ -171,11 +176,12 @@ export class WebAsr {
       };
     });
 
-    // init：传模型字节（转移底层 buffer，避免拷贝）+ sherpa 资源基址 + 识别语言。
+    // init：传模型字节（转移底层 buffer，避免拷贝）+ sherpa 资源基址 + 模型 id + 识别语言。
     const initMsg: ToWorker = {
       type: 'init',
       models: Array.from(models, ([name, bytes]) => ({ name, bytes })),
       sherpaBaseUrl: this.sherpaBaseUrl(),
+      modelId: initModelId,
       language: initLanguage,
     };
     const transfer = initMsg.models.map((m) => m.bytes.buffer);
@@ -267,6 +273,10 @@ export class WebAsr {
       return;
     }
     if (this.worker && this.workerFailed) this.discardWorker(); // 带病 worker 先丢弃，避免被当作已就绪
+    // 识别模型变更：字节不同，原地重建不适用，丢弃后走下面冷启动重建。
+    if (this.worker && this.workerReady && this.workerModelId !== this.config.modelId) {
+      this.discardWorker();
+    }
     if (this.worker && this.workerReady) {
       // 识别语言变了则重建 recognizer（模型仍在内存），保持预热与当前设置一致。
       if (this.workerLanguage !== this.config.language) {
@@ -294,6 +304,10 @@ export class WebAsr {
   private async startInternal(): Promise<WebAsrStartResult> {
     if (this.running) return { ok: true };
     if (this.worker && this.workerFailed) {
+      this.discardWorker();
+    }
+    // 识别模型变更：常驻 worker 装的是旧模型字节，reconfigure 原地重建不适用，冷启动重建。
+    if (this.worker && this.workerReady && this.workerModelId !== this.config.modelId) {
       this.discardWorker();
     }
     // 仅真冷启动（要装模型）才报 loading：预热后的复用路径只剩拿麦克风/搭音频图（亚秒级），
@@ -422,7 +436,7 @@ export class WebAsr {
 
   /**
    * 单帧 16kHz 单声道 PCM 到达：转发给 sherpa Worker（转移底层 buffer，零拷贝）。
-   * Worker 内做 VAD 切段 + SenseVoice 识别，结果经 partial/segment 消息回吐。
+   * Worker 内做 VAD 切段 + 选定模型识别，结果经 partial/segment 消息回吐。
    */
   private handleFrame(frame: Float32Array): void {
     if (!this.worker) return;

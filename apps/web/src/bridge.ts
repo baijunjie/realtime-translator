@@ -10,8 +10,9 @@
 //    繁體等目标脚本后处理沿用 M2M100_SPEC.toScript（两条路径一致）。
 //  - 麦克风权限：navigator.permissions.query；openMicSettings 浏览器无法打开系统设置，空实现。
 //  - ASR：Phase 2 真识别。getUserMedia + AudioWorklet 采麦（见 ./asr/web-asr），帧送进经典 Web Worker
-//    (./asr/sherpa-worker) 跑 sherpa-onnx WASM（Silero VAD + SenseVoice）。模型从 @rt/core ASR_MODELS
-//    下载并缓存在 Cache Storage（见 ./asr/model-store），写入 WASM FS 后识别。单线程 WASM，无需 COOP/COEP。
+//    (./asr/sherpa-worker) 跑 sherpa-onnx WASM（Silero VAD + 按 modelId 选定的离线识别器）。模型从
+//    @rt/core ASR_MODELS 下载并缓存在 Cache Storage（见 ./asr/model-store），写入 WASM FS 后识别。
+//    单线程 WASM，无需 COOP/COEP。
 //
 // 全部能力均已实现（可在此环境验证类型 + 打包）：设置、归档、云 + 本地翻译、事件转发、回调注册、
 // 采麦 + sherpa-onnx WASM 实时识别、getSetupStatus（查缓存）、downloadAsrModels（边下边报进度）。
@@ -299,7 +300,7 @@ export function createWebBridge(): AppBridge {
   }
 
   const api: AppBridge = {
-    // 运行平台标识：UI 据此按 platform 过滤可用模型（web 只出现 sense-voice）等。
+    // 运行平台标识：UI 据此按 platform 过滤可用模型（web 含 sense-voice 及各语言专用模型）等。
     platform: 'web',
     // audioSources 不声明：web 不支持系统音频，缺省即视为 ['mic']（UI 不渲染音源开关）。
     // iOS/iPadOS 上本地翻译模型装不下 WebKit 内存 → 只提供云端翻译（UI 据此隐藏本地引擎选项）。
@@ -394,7 +395,7 @@ export function createWebBridge(): AppBridge {
     async listModels(): Promise<ModelInfo[]> {
       const s = cachedSettings ?? (await readSettingsOnce());
       const models: ModelInfo[] = [];
-      // ASR：仅列出 platforms 含 web 的模型（web 目前只有 sense-voice）。
+      // ASR：仅列出 platforms 含 web 的模型（sense-voice 及各语言专用模型）。
       for (const spec of ASR_MODELS) {
         if (!spec.platforms.includes('web')) continue;
         const downloaded = await areModelsCached(spec.id);

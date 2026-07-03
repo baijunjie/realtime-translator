@@ -112,7 +112,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
       hfFile(PARAFORMER_ZH_DIR, 'tokens.txt', 75_354, 'tokens'),
     ],
     approxBytes: 227_405_559,
-    platforms: ['macos'],
+    platforms: ['macos', 'web'],
   },
   {
     id: 'zipformer-ja-reazonspeech',
@@ -130,7 +130,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
       hfFile('reazonspeech-k2-v2', 'tokens.txt', 45_754, 'tokens', REAZONSPEECH_JA_DIR),
     ],
     approxBytes: 169_180_699,
-    platforms: ['macos'],
+    platforms: ['macos', 'web'],
   },
   {
     id: 'parakeet-tdt-0.6b-v2-en',
@@ -146,7 +146,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
       hfFile(PARAKEET_EN_DIR, 'tokens.txt', 9_384, 'tokens'),
     ],
     approxBytes: 661_190_513,
-    platforms: ['macos'],
+    platforms: ['macos', 'web'],
   },
 ];
 
