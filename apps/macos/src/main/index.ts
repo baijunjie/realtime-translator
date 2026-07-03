@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import {
   app,
   BrowserWindow,
-  desktopCapturer,
   ipcMain,
   session,
   shell,
@@ -591,19 +590,15 @@ app.whenReady().then(() => {
   if (!app.isPackaged && process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(APP_ICON);
   }
-  // 系统音频采集：渲染层 getDisplayMedia 走到这里。取主屏作为 video 源（渲染层随即停掉 video 轨，
-  // 只用 audio），audio:'loopback' 采集系统播放的声音。不使用系统选择器（useSystemPicker）。
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
-    desktopCapturer
-      .getSources({ types: ['screen'] })
-      .then((sources) => {
-        if (sources[0]) {
-          callback({ video: sources[0], audio: 'loopback' });
-        } else {
-          callback({}); // 无屏幕源：拒绝，渲染层 getDisplayMedia 随之 reject
-        }
-      })
-      .catch(() => callback({}));
+  // 系统音频采集：渲染层 getDisplayMedia 走到这里，audio:'loopback' 采集系统播放的声音
+  // （CoreAudio Tap，触发的是「系统音频录制」授权）。video 轨用请求方自身 frame 的画面充当
+  // （渲染层拿到流后立即停掉，只用 audio）——不经 desktopCapturer 取屏幕源，因此**不需要**
+  // macOS「屏幕录制」权限，也不存在取源失败的异步拒绝路径。不使用系统选择器（useSystemPicker）。
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    // frame 已随导航/窗口关闭销毁时不作答：请求随渲染上下文一并消亡，无需（也无法）供流
+    if (request.frame) {
+      callback({ video: request.frame, audio: 'loopback' });
+    }
   });
   createWindow();
   // 启动即按「翻译已开 + 本地引擎 + 模型已缓存」预热本地翻译模型，降低首句翻译延迟；
