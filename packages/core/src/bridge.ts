@@ -68,7 +68,7 @@ export interface AppBridge {
   /**
    * 测试云端翻译配置是否可用：真实打一次最小请求，验证端点 / 密钥 / 模型。ok=false 时带 error。
    * Web / iOS 在 JS 内直接 fetch；macOS 在主进程用 Node fetch（preload 处收紧为必选实现）。
-   * UI 仅在本方法存在时才显示「测试连接」按钮，并把云端引擎的「保存」前置为「测试通过」。
+   * UI 仅在本方法存在时才显示「测试连接」按钮。
    */
   testCloud?(cfg: CloudTranslationConfig): Promise<{ ok: boolean; error?: string }>;
   /**
