@@ -5,9 +5,10 @@
 //  - 设置 / 归档持久化：IndexedDB（idb 库），纯逻辑复用 @rt/core
 //    （makeDefaults / withDefaults / listSummaries / makeArchiveId / toSummary）。
 //  - 翻译：segment 到达且开启翻译时翻成母语，两种引擎与 macOS 对齐：
-//    · engine==='cloud'  → @rt/core CloudTranslator（fetch OpenAI 兼容端点）。
-//    · 否则（本地 m2m100）→ Transformers.js（Xenova/m2m100_418M，浏览器内 WASM），见 ./translation。
-//    繁體等目标脚本后处理沿用 M2M100_SPEC.toScript（两条路径一致）。
+//    · engine==='cloud' → @rt/core CloudTranslator（fetch OpenAI 兼容端点）。
+//    · 否则（本地）      → Transformers.js（浏览器内 WASM，见 ./translation），具体模型由注册表
+//      LOCAL_TRANSLATION_MODELS 按当前 engine 选定（默认 m2m100，可选 mbart50）。
+//    简繁等目标脚本后处理沿用所选 spec 的 toScript（两条路径一致）。
 //  - 麦克风权限：navigator.permissions.query；openMicSettings 浏览器无法打开系统设置，空实现。
 //  - ASR：Phase 2 真识别。getUserMedia + AudioWorklet 采麦（见 ./asr/web-asr），帧送进经典 Web Worker
 //    (./asr/sherpa-worker) 跑 sherpa-onnx WASM（Silero VAD + 按 modelId 选定的离线识别器）。模型从
@@ -24,7 +25,9 @@ import {
   listSummaries,
   makeArchiveId,
   CloudTranslator,
-  M2M100_SPEC,
+  LOCAL_TRANSLATION_MODELS,
+  DEFAULT_TRANSLATION_MODEL_ID,
+  getTranslationModel,
   hasAllWeightFiles,
   translateFinalizedSegment,
   createTranslateProgressAggregator,
@@ -40,6 +43,7 @@ import type {
   ArchiveRecord,
   ArchiveSummary,
   CloudTranslationConfig,
+  LocalModelSpec,
   StartResult,
   MicPermission,
   ModelInfo,
@@ -74,31 +78,31 @@ const SETTINGS_KEY = 'settings';
 // _quantized 后缀（如 onnx/decoder_model_merged_quantized.onnx）。据此判断本地翻译模型是否已缓存。
 const TRANSFORMERS_CACHE_NAME = 'transformers-cache';
 
-// 本地翻译模型（M2M100）是否已在 Cache Storage 里：spec 的全部权重（encoder+decoder）都有
+// 指定本地翻译模型是否已在 Cache Storage 里：spec 的全部权重（encoder+decoder）都有
 // 对应 .onnx 条目才算就绪——Cache Storage 按条目逐出，只查任一权重会把部分逐出误判为已就绪。
 // Cache API 不可用或查询异常时返回 false——宁可多走一次下载页（页内命中缓存会瞬间完成），
 // 也不误判为已就绪而在缺模型时跳过下载。
-async function isTranslationModelCached(): Promise<boolean> {
+async function isTranslationModelCached(spec: LocalModelSpec): Promise<boolean> {
   if (typeof caches === 'undefined') return false;
   try {
     const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
     const urls = (await cache.keys())
       .map((req) => req.url)
-      .filter((u) => u.includes(M2M100_SPEC.modelId));
-    return hasAllWeightFiles(M2M100_SPEC, urls);
+      .filter((u) => u.includes(spec.modelId));
+    return hasAllWeightFiles(spec, urls);
   } catch {
     return false;
   }
 }
 
-// 删除 Transformers.js 缓存里属于本地翻译模型（M2M100）的全部条目：按 URL 含 modelId 逐条删，
-// 不清整个缓存（同缓存名可能存放其他 Transformers.js 资源）。删后翻译器实例须置空重建。
-async function deleteTranslationModelFromCache(): Promise<void> {
+// 删除 Transformers.js 缓存里属于指定本地翻译模型的全部条目：按 URL 含 modelId 逐条删，
+// 不清整个缓存（同缓存名可能存放其它模型/资源）。删后对应翻译器实例须置空重建。
+async function deleteTranslationModelFromCache(spec: LocalModelSpec): Promise<void> {
   if (typeof caches === 'undefined') return;
   const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
   const keys = await cache.keys();
   await Promise.all(
-    keys.filter((req) => req.url.includes(M2M100_SPEC.modelId)).map((req) => cache.delete(req)),
+    keys.filter((req) => req.url.includes(spec.modelId)).map((req) => cache.delete(req)),
   );
 }
 
@@ -114,6 +118,13 @@ function applyPlatformConstraints(s: AppSettings): AppSettings {
   const spec = getAsrModel(s.asr.model);
   if (!spec || !spec.platforms.includes('web')) {
     s.asr.model = DEFAULT_ASR_MODEL_ID;
+  }
+  // 本地翻译引擎若在 web 不可用（platforms 不含 web 或 id 未知），回落默认本地模型。
+  if (s.translation.engine !== 'cloud') {
+    const trSpec = getTranslationModel(s.translation.engine);
+    if (!trSpec || !trSpec.platforms.includes('web')) {
+      s.translation.engine = DEFAULT_TRANSLATION_MODEL_ID;
+    }
   }
   return s;
 }
@@ -131,10 +142,25 @@ export function createWebBridge(): AppBridge {
   //    翻译开关就是 cachedSettings.translation.enabled，改后即时生效并落盘，不再另存一份布尔。 ——
   let cachedSettings: AppSettings | null = null;
 
-  // —— 本地翻译器（懒建，缓存模型实例，首次翻译触发下载） ——
+  // —— 本地翻译器（懒建，缓存模型实例，首次翻译触发下载）。按当前引擎对应的 spec 建：
+  //    引擎变化（切换本地模型）时丢弃旧实例、按新 spec 重建，保证保存路径与翻译热路径一致。 ——
   let localTranslator: WebLocalTranslator | null = null;
+  let localTranslatorId: string | null = null;
+
+  // 当前设置对应的本地翻译模型 spec：engine 为 cloud/未知时回落默认本地模型（仅作占位，
+  // 云端路径不会用到它做推理）。applyPlatformConstraints 已保证 engine 为 web 可用的本地 id 或 cloud。
+  function currentTranslationSpec(): LocalModelSpec {
+    const engine = cachedSettings?.translation.engine;
+    const id = engine && engine !== 'cloud' ? engine : DEFAULT_TRANSLATION_MODEL_ID;
+    return getTranslationModel(id) ?? getTranslationModel(DEFAULT_TRANSLATION_MODEL_ID)!;
+  }
+
   function getLocalTranslator(): WebLocalTranslator {
-    if (!localTranslator) localTranslator = new WebLocalTranslator(M2M100_SPEC);
+    const spec = currentTranslationSpec();
+    if (!localTranslator || localTranslatorId !== spec.id) {
+      localTranslator = new WebLocalTranslator(spec);
+      localTranslatorId = spec.id;
+    }
     return localTranslator;
   }
 
@@ -142,14 +168,15 @@ export function createWebBridge(): AppBridge {
   //    状态回调在内部完成 loading→ready/error 的上报；同时把失败向上抛，供显式下载页（downloadTranslationModel）
   //    据返回值判定 done/failed。不关心结果的调用方（保存/启动预热）自行 .catch 吞掉即可（错误已上报）。 ——
   async function warmUpLocalModel(): Promise<void> {
+    const spec = currentTranslationSpec();
     // 已缓存：只是把模型从缓存读入内存——Transformers.js 读缓存时也发进度事件，
     // 若照报会让 UI 每次装载都显示「下载中」，故抑制；未缓存才是真下载，报进度。
-    const reportProgress = !(await isTranslationModelCached());
+    const reportProgress = !(await isTranslationModelCached(spec));
     translationStatusCb.emit({ state: 'loading' });
     // 模型由多个文件并行下载，逐文件百分比会让单一进度条来回跳；经聚合器换成按字节聚合的
     // 总进度 + 各文件独立进度，每次加载新建一个（ModelProgress 与 TranslateProgress 同形）。
-    // 用 spec 的近似总字节预置分母，总进度不因文件陆续注册而回落。
-    const aggregate = createTranslateProgressAggregator(M2M100_SPEC.approxDownloadBytes);
+    // 用当前 spec 的近似总字节预置分母，总进度不因文件陆续注册而回落。
+    const aggregate = createTranslateProgressAggregator(spec.approxDownloadBytes);
     return getLocalTranslator()
       .warmUp((p) => {
         if (!reportProgress) return;
@@ -241,7 +268,9 @@ export function createWebBridge(): AppBridge {
   async function translateSegment(seg: SegmentPayload): Promise<void> {
     const s = cachedSettings ?? (await readSettingsOnce());
     await translateFinalizedSegment({
-      spec: M2M100_SPEC,
+      // 规划用 spec 按当前引擎查表；云端/未知回落默认本地模型（skip/script/toScript 判定与模型无关，
+      // 云端路径只用 targetLang 而非 targetCode，故回落不影响云端译文）。
+      spec: currentTranslationSpec(),
       segment: seg,
       enabled: s.translation.enabled,
       nativeLang: s.nativeLang,
@@ -352,7 +381,7 @@ export function createWebBridge(): AppBridge {
       if (
         saved.translation.enabled &&
         saved.translation.engine !== 'cloud' &&
-        (await isTranslationModelCached())
+        (await isTranslationModelCached(currentTranslationSpec()))
       ) {
         void warmUpLocalModel().catch(() => undefined);
       }
@@ -409,17 +438,20 @@ export function createWebBridge(): AppBridge {
           inUse: s.asr.model === spec.id,
         });
       }
-      // 翻译（M2M100，Transformers.js Cache API 缓存）。同理已缓存时用规格近似字节。
-      // iOS/iPadOS 上本地翻译不可用（引擎恒为云端，见 applyPlatformConstraints），不列该条目。
+      // 翻译（Transformers.js Cache API 缓存）：注册表驱动（platforms 含 web）。已缓存时用规格近似字节。
+      // iOS/iPadOS 上本地翻译不可用（引擎恒为云端，见 applyPlatformConstraints），整组跳过。
       if (!isIOS()) {
-        const translationDownloaded = await isTranslationModelCached();
-        models.push({
-          kind: 'translation',
-          id: 'm2m100',
-          sizeBytes: translationDownloaded ? M2M100_SPEC.approxDownloadBytes : 0,
-          downloaded: translationDownloaded,
-          inUse: s.translation.engine === 'm2m100',
-        });
+        for (const spec of LOCAL_TRANSLATION_MODELS) {
+          if (!spec.platforms.includes('web')) continue;
+          const downloaded = await isTranslationModelCached(spec);
+          models.push({
+            kind: 'translation',
+            id: spec.id,
+            sizeBytes: downloaded ? spec.approxDownloadBytes : 0,
+            downloaded,
+            inUse: s.translation.engine === spec.id,
+          });
+        }
       }
       return models;
     },
@@ -439,9 +471,17 @@ export function createWebBridge(): AppBridge {
           // 常驻 worker 可能仍在内存里持有该模型：丢弃，令下次 start 重查缓存、必要时重下载。
           await asr.dropIdleWorker();
         } else {
-          // 翻译模型：删缓存条目并置空翻译器实例，下次翻译重新懒建（会触发重新下载）。
-          await deleteTranslationModelFromCache();
-          localTranslator = null;
+          // 翻译模型：按 spec 删该模型缓存条目；若删的正是当前已建的翻译器实例，则置空，
+          // 下次翻译按当前引擎重新懒建（会触发重新下载）。
+          const spec = getTranslationModel(id);
+          if (!spec || !spec.platforms.includes('web')) {
+            return { ok: false, error: '未知的翻译模型' };
+          }
+          await deleteTranslationModelFromCache(spec);
+          if (localTranslatorId === id) {
+            localTranslator = null;
+            localTranslatorId = null;
+          }
         }
         return { ok: true };
       } catch (e) {
@@ -451,14 +491,14 @@ export function createWebBridge(): AppBridge {
 
     // ===== 本地翻译模型（M2M100，Transformers.js Cache API 缓存） =====
     async getTranslationSetupStatus(): Promise<{ ready: boolean }> {
-      // 查 Transformers.js 缓存里是否已有本模型的 onnx 权重（详见 isTranslationModelCached）。
+      // 查 Transformers.js 缓存里是否已有**当前选中**本地模型的 onnx 权重（详见 isTranslationModelCached）。
       // 未缓存则 UI 在开启本地翻译时先进翻译模型下载页。
-      return { ready: await isTranslationModelCached() };
+      return { ready: await isTranslationModelCached(currentTranslationSpec()) };
     },
     async downloadTranslationModel(): Promise<{ ok: boolean; error?: string }> {
       // 显式下载/装载本地翻译模型：复用 warmUpLocalModel 的单飞加载路径（进度经 onTranslationStatus
       // 上报），await 其完成；成功返回 ok，异常返回 error 供下载页重试。不另起加载路径以免与
-      // warmUp 单飞逻辑打架。首次会下 ~630MB，命中缓存则仅装载入内存、瞬间完成。
+      // warmUp 单飞逻辑打架。首次会下数百 MB 权重，命中缓存则仅装载入内存、瞬间完成。
       try {
         await warmUpLocalModel();
         return { ok: true };
@@ -471,7 +511,7 @@ export function createWebBridge(): AppBridge {
     async forceUpdateApp(): Promise<void> {
       // 注销 SW + 清应用外壳缓存后整页重载：重载时无 SW 拦截、直接回源取最新 index.html
       // 与构建产物，随后 SW 重新注册并按新产物重新预缓存。
-      // 模型缓存必须保留（ASR ~230MB + 本地翻译 ~630MB，误删会让用户重新下载）。
+      // 模型缓存必须保留（ASR 与本地翻译权重合计数百 MB～GB，误删会让用户重新下载）。
       const keep = new Set([
         ASR_MODEL_CACHE_NAME,
         // Transformers.js 模型缓存（env.cacheKey 默认值，本项目未改）。
@@ -546,7 +586,7 @@ export function createWebBridge(): AppBridge {
     if (
       s.translation.enabled &&
       s.translation.engine !== 'cloud' &&
-      (await isTranslationModelCached())
+      (await isTranslationModelCached(currentTranslationSpec()))
     ) {
       void warmUpLocalModel().catch(() => undefined);
     }

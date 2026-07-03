@@ -4,7 +4,7 @@ import { NButton, NModal, NInput, NDropdown, NTooltip } from 'naive-ui';
 import type { DropdownMixedOption } from 'naive-ui/es/dropdown/src/interface';
 import { Settings, Trash2, Archive, Library, Eraser, LoaderCircle, TriangleAlert, MoreHorizontal, Mic, MonitorSpeaker, Square, RefreshCw } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
-import { getAsrModel, M2M100_SPEC } from '@rt/core';
+import { getAsrModel, getTranslationModel } from '@rt/core';
 import { settings, saveSettings } from '../composables/useSettings';
 import {
   lines,
@@ -207,10 +207,11 @@ async function onRecordClick(): Promise<void> {
   }
   // 本地翻译模型：开启翻译且用本地引擎、桥接需自行下载且未就绪时加下载任务
   const getTrStatus = bridge().getTranslationSetupStatus;
-  if (s.translation.enabled && s.translation.engine !== 'cloud' && getTrStatus && bridge().downloadTranslationModel) {
+  const trSpec = s.translation.engine !== 'cloud' ? getTranslationModel(s.translation.engine) : undefined;
+  if (s.translation.enabled && trSpec && getTrStatus && bridge().downloadTranslationModel) {
     try {
       const { ready } = await getTrStatus();
-      if (!ready) tasks.push({ kind: 'translation', nameKey: 'models.m2m100', sizeBytes: M2M100_SPEC.approxDownloadBytes });
+      if (!ready) tasks.push({ kind: 'translation', nameKey: trSpec.nameKey, sizeBytes: trSpec.approxDownloadBytes });
     } catch {
       /* 查询失败不拦截，按已就绪继续 */
     }

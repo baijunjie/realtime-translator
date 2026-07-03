@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue';
 import { NButton, NTag, NPopconfirm, NTooltip } from 'naive-ui';
 import { Download, Trash2 } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
-import { getAsrModel, M2M100_SPEC, type ModelInfo } from '@rt/core';
+import { getAsrModel, getTranslationModel, type ModelInfo } from '@rt/core';
 import { bridge } from '../../bridge';
 import { recording, recordBusy, modelLoading } from '../../composables/useTranscription';
 import { humanBytes } from '../../utils/bytes';
@@ -18,19 +18,17 @@ const translationModels = computed(() => models.value.filter((m) => m.kind === '
 // 录音 / 启停在途 / 模型加载中一律禁用删除，避免删掉正在使用或正在装载的模型。
 const deleteDisabled = computed(() => recording.value || recordBusy.value || modelLoading.value);
 
-// 显示名：ASR 按注册表 nameKey 解析；翻译模型仅 m2m100；未知 id 直接显示 id。
+// 显示名：ASR / 翻译均按各自注册表 nameKey 解析；未知 id 直接显示 id。
 function displayName(m: ModelInfo): string {
-  if (m.kind === 'asr') {
-    const spec = getAsrModel(m.id);
-    return spec ? t(spec.nameKey) : m.id;
-  }
-  return m.id === 'm2m100' ? t('models.m2m100') : m.id;
+  const spec = m.kind === 'asr' ? getAsrModel(m.id) : getTranslationModel(m.id);
+  return spec ? t(spec.nameKey) : m.id;
 }
 
 // 未下载时显示注册表近似体积；已下载显示实际占用。
 function registryBytes(m: ModelInfo): number {
-  if (m.kind === 'asr') return getAsrModel(m.id)?.approxBytes ?? 0;
-  return m.id === 'm2m100' ? M2M100_SPEC.approxDownloadBytes : 0;
+  return m.kind === 'asr'
+    ? (getAsrModel(m.id)?.approxBytes ?? 0)
+    : (getTranslationModel(m.id)?.approxDownloadBytes ?? 0);
 }
 
 function sizeText(m: ModelInfo): string {
@@ -67,7 +65,7 @@ function download(m: ModelInfo): void {
             sizeBytes: registryBytes(m),
           },
         ]
-      : [{ kind: 'translation', nameKey: 'models.m2m100', sizeBytes: registryBytes(m) }];
+      : [{ kind: 'translation', nameKey: getTranslationModel(m.id)?.nameKey ?? m.id, sizeBytes: registryBytes(m) }];
   downloadModalOpen.value = true;
 }
 

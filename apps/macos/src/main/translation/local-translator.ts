@@ -4,7 +4,7 @@
 // 模型规格 / 语言映射 / 简繁归一化是平台无关的，已下沉到 @rt/core，这里只保留依赖原生模块的执行层。
 import { pipeline, env } from '@huggingface/transformers';
 import {
-  M2M100_SPEC,
+  getTranslationModel,
   type LocalModelSpec,
   type Translator,
   type TranslateProgress,
@@ -12,14 +12,13 @@ import {
 import { localModelCached } from './model-cache';
 import type { LocalEngine } from '../../shared/types';
 
-// 新增本地模型只需在此加一份 spec（许可需为可自由分发，如 MIT/Apache）。
-const SPECS: Record<LocalEngine, LocalModelSpec> = {
-  m2m100: M2M100_SPEC,
-};
-
-/** 某本地引擎的模型规格（进度分母预置等场景使用） */
+/** 某本地引擎的模型规格（进度分母预置等场景使用）；未知引擎抛错（应由校验层拦住）。 */
 export function localSpecFor(engine: LocalEngine): LocalModelSpec {
-  return SPECS[engine];
+  const spec = getTranslationModel(engine);
+  if (!spec) {
+    throw new Error(`未知的本地翻译模型: ${engine}`);
+  }
+  return spec;
 }
 
 // pipeline() 返回的可调用对象：输入文本 + 源/目标语言码，输出 [{ translation_text }]
@@ -107,5 +106,5 @@ class LocalTranslator implements Translator {
 
 /** 按引擎 id 创建本地翻译器 */
 export function createLocalTranslator(engine: LocalEngine, cacheDir: string): Translator {
-  return new LocalTranslator(SPECS[engine], cacheDir);
+  return new LocalTranslator(localSpecFor(engine), cacheDir);
 }

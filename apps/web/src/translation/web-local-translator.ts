@@ -1,8 +1,6 @@
-// 浏览器端本地翻译：把 Transformers.js M2M100 的推理放到 Web Worker（见 ./translate-worker），
-// 主线程不被模型推理阻塞。本类是瘦代理：做语言码映射 + 同语言短路 + 繁體 toScript 后处理（都很轻），
-// 实际推理通过消息发给 worker、按 id 对应结果。模型差异收敛在 @rt/core 的 M2M100_SPEC。
-//
-// 对外 API（translate）与之前一致，故 bridge 无需改动。
+// 浏览器端本地翻译：把 Transformers.js seq2seq 翻译模型的推理放到 Web Worker（见 ./translate-worker），
+// 主线程不被模型推理阻塞。本类是瘦代理：做语言码映射 + 同语言短路 + 简繁 toScript 后处理（都很轻），
+// 实际推理通过消息发给 worker、按 id 对应结果。模型差异全部收敛到传入的 LocalModelSpec（见 @rt/core 注册表）。
 import { M2M100_SPEC, type LocalModelSpec } from '@rt/core';
 import type { ToTranslateWorker, FromTranslateWorker } from './translate-worker-protocol';
 
@@ -113,9 +111,9 @@ export class WebLocalTranslator {
   }
 
   /**
-   * 把 text 翻成 target（短码 zh/en/ja/ko/yue），经 M2M100 语言码映射。
-   * 目标若需脚本后处理（M2M100 只有一个 'zh'，繁體靠脚本转换）则套 toScript。
-   * onProgress 透传 worker 的模型下载进度（首次会下载 ~630MB）。
+   * 把 text 翻成 target（app 语言键 zh/en/ja/ko），经 spec.langs 映射到模型语言码。
+   * 目标若需脚本后处理（中文母语归一化为简体）则套 toScript。
+   * onProgress 透传 worker 的模型下载进度（首次会下载数百 MB 权重）。
    */
   async translate(
     text: string,

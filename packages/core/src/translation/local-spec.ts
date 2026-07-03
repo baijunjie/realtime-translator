@@ -2,7 +2,7 @@
 // 以及中文简体归一化（normalizeZh，基于 chinese-conv）。
 // 具体跑模型的 LocalTranslator 实现（依赖 onnxruntime-node）留在各端。
 import { sify } from 'chinese-conv';
-import type { LocalEngine } from '../types';
+import type { LocalEngine, Platform } from '../types';
 
 /** 中文简体归一化：模型输出偶带繁体字形，统一转简体（成本极低，值得保留）。 */
 export function normalizeZh(text: string): string {
@@ -28,6 +28,8 @@ export interface LangEntry {
 
 export interface LocalModelSpec {
   id: LocalEngine;
+  /** UI 端 i18n 显示名 key（形如 models.m2m100）。 */
+  nameKey: string;
   /** HuggingFace 仓库标识（首次联网下载后离线复用） */
   modelId: string;
   /** 量化档位 */
@@ -46,6 +48,8 @@ export interface LocalModelSpec {
   langs: Record<string, LangEntry>;
   /** 未知语言的回退（通常英语） */
   fallbackLang: string;
+  /** 支持该模型的平台（如 iOS 走系统翻译、不消费本地权重，故不列入）。 */
+  platforms: Platform[];
 }
 
 /** 已缓存文件名/URL 列表是否覆盖 spec 的全部权重文件（每个特征串命中至少一个 .onnx） */
@@ -56,6 +60,7 @@ export function hasAllWeightFiles(spec: LocalModelSpec, cached: string[]): boole
 // M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
 export const M2M100_SPEC: LocalModelSpec = {
   id: 'm2m100',
+  nameKey: 'models.m2m100',
   modelId: 'Xenova/m2m100_418M',
   dtype: 'q8',
   // seq2seq 双权重：encoder + merged decoder（q8 档文件名带 _quantized 后缀，用特征串匹配）
@@ -72,7 +77,47 @@ export const M2M100_SPEC: LocalModelSpec = {
     // 云端可真正翻译粤→中；本地模型做不到时由翻译器内部回退到字形转换。
     yue: { code: 'zh' },
   },
+  platforms: ['macos', 'web'],
 };
+
+// mBART-50 many-to-many（基座 facebook/mbart-large-50 为 MIT）。参数量大于 M2M100，翻译质量更高、体积更大。
+// 语言码用 mBART-50 的 locale 风格串（en_XX / ja_XX / ko_KR / zh_CN）；简繁字形处理与 M2M100 同构：
+// 中文母语归一化为简体，yue 与 zh 共用模型码 zh_CN 但作不同语言处理（lang 回退到键 'yue'）。
+export const MBART50_SPEC: LocalModelSpec = {
+  id: 'mbart50',
+  nameKey: 'models.mbart50',
+  modelId: 'Xenova/mbart-large-50-many-to-many-mmt',
+  dtype: 'q8',
+  weightFiles: ['encoder_model', 'decoder_model'],
+  // q8 encoder(409.7MB) + decoder_merged(462.9MB) + tokenizer.json(17.1MB) + 根目录 config 等小文件之和。
+  approxDownloadBytes: 889_657_579,
+  fallbackLang: 'en_XX',
+  langs: {
+    zh: { code: 'zh_CN', lang: 'zh', toScript: normalizeZh },
+    en: { code: 'en_XX' },
+    ja: { code: 'ja_XX' },
+    ko: { code: 'ko_KR' },
+    // yue 无独立 mBART-50 语言码，落 zh_CN；与 zh 作不同语言处理（lang 回退到键 'yue'）。
+    yue: { code: 'zh_CN' },
+  },
+  platforms: ['macos', 'web'],
+};
+
+/** 可选用的本地翻译模型注册表（默认项在首）。 */
+export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = [M2M100_SPEC, MBART50_SPEC];
+
+/** 默认本地翻译模型 id（轻量、全本地平台可用）。 */
+export const DEFAULT_TRANSLATION_MODEL_ID: LocalEngine = 'm2m100';
+
+/** 按 id 取本地翻译模型规格；未知 id 返回 undefined。 */
+export function getTranslationModel(id: string): LocalModelSpec | undefined {
+  return LOCAL_TRANSLATION_MODELS.find((m) => m.id === id);
+}
+
+/** 某平台上可用的本地翻译模型（platforms 含该平台）。 */
+export function translationModelsFor(platform: Platform): LocalModelSpec[] {
+  return LOCAL_TRANSLATION_MODELS.filter((m) => m.platforms.includes(platform));
+}
 
 /**
  * 一条定稿段「要不要翻、怎么翻」的决策（平台无关）。目标恒为母语 nativeLang，三端共用同一判定。

@@ -2,17 +2,27 @@
 import { computed, ref, watch } from 'vue';
 import { NSelect, NInput, NAutoComplete, NFormItem, NAlert, NButton, type SelectOption } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
+import { translationModelsFor } from '@rt/core';
 import { bridge } from '../../bridge';
+import { humanBytes } from '../../utils/bytes';
 import type { SettingsFormData } from './form';
 
 const { t } = useI18n();
 // 父组件持有 reactive 表单对象，子组件直接修改其字段
 const props = defineProps<{ form: SettingsFormData }>();
 
-// 平台是否支持本地翻译引擎（Web 在 iOS 上为 false：WebKit 内存装不下本地模型）。
-// 不可用时仅从「翻译方式」下拉里去掉「本地」项（仍保留 无 / 云端）。iOS 上持久化的 engine
+// 平台是否支持本地翻译（Web 在 iOS 上为 false：WebKit 内存装不下本地模型）。
+// 不可用时仅从「翻译方式」下拉里去掉「本地模型」项（仍保留 无 / 云端）。iOS 上持久化的 engine
 // 也已被 bridge 收敛为 cloud（applyPlatformConstraints），故表单不会停在无法选中的本地项。
 const localTranslationAvailable = bridge().localTranslationAvailable !== false;
+
+// 本平台可选的本地翻译模型（iOS 走系统翻译、无可选权重模型时为空：方式仍可选本地，但不渲染模型下拉）。
+const localModelOptions = computed(() =>
+  translationModelsFor(bridge().platform).map((m) => ({
+    label: `${t(m.nameKey)}（${humanBytes(m.approxDownloadBytes)}）`,
+    value: m.id,
+  })),
+);
 
 // —— 云端连接测试（自查工具，不阻断任何操作）——
 // 平台是否支持云端测试：Web / iOS 用 JS fetch 实现；macOS 云翻译在独立进程、未提供本方法
@@ -40,10 +50,10 @@ async function runCloudTest(): Promise<void> {
   if (!r.ok) cloudTestError.value = r.error ?? '';
 }
 
-// 引擎或任一云端字段变化 → 作废上次测试结果（配置已变，旧结果不再对应当前配置）。
+// 翻译方式或任一云端字段变化 → 作废上次测试结果（配置已变，旧结果不再对应当前配置）。
 watch(
   [
-    () => props.form.engine,
+    () => props.form.translationMode,
     () => props.form.cloud.baseURL,
     () => props.form.cloud.apiKey,
     () => props.form.cloud.model,
@@ -54,10 +64,10 @@ watch(
   },
 );
 
-// 三态：无 / 本地（仅本地引擎可用时）/ 云端。选中模型即开启翻译，选「无」即关闭。
-const engineOptions = computed(() => [
+// 三态：无 / 本地模型（仅本平台支持本地翻译时）/ 云端。选中方式即开启翻译，选「无」即关闭。
+const modeOptions = computed(() => [
   { label: t('settings.engineNone'), value: 'none' },
-  ...(localTranslationAvailable ? [{ label: t('settings.engineM2m100'), value: 'm2m100' }] : []),
+  ...(localTranslationAvailable ? [{ label: t('settings.engineLocal'), value: 'local' }] : []),
   { label: t('settings.engineCloud'), value: 'cloud' },
 ]);
 
@@ -149,10 +159,15 @@ const modelOptions = computed(() => {
 <template>
   <div>
     <n-form-item :label="t('settings.engine')">
-      <n-select v-model:value="form.engine" :options="engineOptions" />
+      <n-select v-model:value="form.translationMode" :options="modeOptions" />
     </n-form-item>
 
-    <template v-if="form.engine === 'cloud'">
+    <!-- 本地方式且本平台有可选权重模型时，显示「翻译模型」下拉；iOS 走系统翻译时不渲染 -->
+    <n-form-item v-if="form.translationMode === 'local' && localModelOptions.length" :label="t('settings.translationModel')">
+      <n-select v-model:value="form.translationModel" :options="localModelOptions" />
+    </n-form-item>
+
+    <template v-if="form.translationMode === 'cloud'">
       <n-alert type="warning" :show-icon="true" class="mb-3.5">{{ t('settings.cloudWarn') }}</n-alert>
       <n-form-item :label="t('settings.baseUrl')">
         <n-auto-complete

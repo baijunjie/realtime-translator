@@ -2,6 +2,7 @@
 // 不依赖任何平台 API——系统语言由调用方传入，持久化（fs 等）留在各端实现。
 import type { AppSettings, AsrLang, UiLang } from './types';
 import { DEFAULT_ASR_MODEL_ID, getAsrModel } from './models';
+import { DEFAULT_TRANSLATION_MODEL_ID, getTranslationModel } from './translation/local-spec';
 
 /** UI 语言下拉的渲染顺序（按 key 字母序）。 */
 export const UI_LANGS: UiLang[] = ['en', 'ja', 'ko', 'zh'];
@@ -35,7 +36,7 @@ export function makeDefaults(systemLangs: string[]): AppSettings {
     audioSource: 'mic',
     translation: {
       enabled: false,
-      engine: 'm2m100',
+      engine: DEFAULT_TRANSLATION_MODEL_ID,
       // 云端三项默认留空：主页设置里由预设选择或手动输入填入（占位符仅作示例提示）
       cloud: {
         baseURL: '',
@@ -83,7 +84,13 @@ export function withDefaults(raw: unknown, defaults: AppSettings): AppSettings {
       s.audioSource === 'mic' || s.audioSource === 'system' ? s.audioSource : d.audioSource,
     translation: {
       enabled: typeof t.enabled === 'boolean' ? t.enabled : d.translation.enabled,
-      engine: t.engine === 'cloud' ? 'cloud' : 'm2m100',
+      // 引擎：'cloud' 或注册表中的本地模型 id 原样保留，其余（未知/旧值）回落默认本地模型。
+      engine:
+        t.engine === 'cloud'
+          ? 'cloud'
+          : typeof t.engine === 'string' && getTranslationModel(t.engine)
+            ? getTranslationModel(t.engine)!.id
+            : DEFAULT_TRANSLATION_MODEL_ID,
       cloud: {
         baseURL: (cloud.baseURL as string) || d.translation.cloud.baseURL,
         apiKey: (cloud.apiKey as string) ?? '',

@@ -11,12 +11,15 @@ import {
   type UtilityProcess,
 } from 'electron';
 import {
-  M2M100_SPEC,
+  LOCAL_TRANSLATION_MODELS,
+  DEFAULT_TRANSLATION_MODEL_ID,
+  getTranslationModel,
   translateFinalizedSegment,
   CloudTranslator,
   ASR_MODELS,
   getAsrModel,
   requiredAsrFiles,
+  type LocalModelSpec,
   type SegmentTranslateRequest,
   type AsrLang,
   type ModelInfo,
@@ -82,9 +85,17 @@ let pendingModelDownload: {
   resolve: (r: { ok: boolean; error?: string }) => void;
 } | null = null;
 
-// 本地翻译模型是否已完整缓存：据此回答下载页「是否已缓存」，并在设置保存时门控本地模型的自动预热。
+// 当前选中的本地翻译模型 spec（引擎为 cloud 或未知本地 id 时无）。
+function currentTranslationSpec(): LocalModelSpec | undefined {
+  const engine = loadSettings().translation.engine;
+  return engine === 'cloud' ? undefined : getTranslationModel(engine);
+}
+
+// 当前选中的本地翻译模型是否已完整缓存：据此回答下载页「是否已缓存」，并在设置保存时门控自动预热。
+// 语义 =「当前选中的本地翻译模型」，与 getTranslationSetupStatus/downloadTranslationModel 契约一致。
 function translationModelCached(): boolean {
-  return localModelCached(TRANSLATION_CACHE_DIR, M2M100_SPEC);
+  const spec = currentTranslationSpec();
+  return spec ? localModelCached(TRANSLATION_CACHE_DIR, spec) : false;
 }
 
 /** 本机是否支持系统音频采集（macOS 14.2+）。与 preload 的音源判定共用同一逻辑。 */
@@ -252,8 +263,13 @@ function reconfigureTranslate(): void {
  *  与 web/iOS 一致；这里注入的引擎是翻译子进程消息协议的 Promise 封装。 */
 function translateSegment(segment: SegmentPayload): void {
   const settings = loadSettings();
+  // 规划用 spec 按当前引擎查表；云端/未知引擎回落默认本地模型（planTranslation 的 skip/script/toScript
+  // 判定与本地模型无关，云端路径只用 targetLang 而非 targetCode，故回落不影响云端译文）。
+  const spec =
+    getTranslationModel(settings.translation.engine) ??
+    getTranslationModel(DEFAULT_TRANSLATION_MODEL_ID)!;
   void translateFinalizedSegment({
-    spec: M2M100_SPEC,
+    spec,
     segment,
     enabled: settings.translation.enabled,
     nativeLang: settings.nativeLang,
@@ -448,13 +464,18 @@ ipcMain.handle('models:list', (): ModelInfo[] => {
       inUse: settings.asr.model === spec.id,
     });
   }
-  models.push({
-    kind: 'translation',
-    id: 'm2m100',
-    sizeBytes: dirSize(TRANSLATION_CACHE_DIR),
-    downloaded: translationModelCached(),
-    inUse: settings.translation.engine === 'm2m100',
-  });
+  // 翻译模型：注册表驱动（platforms 含 macos）。每模型占用/齐全按其在 transformers 缓存中的
+  // 子目录（<cacheDir>/<modelId>）判断；modelId 形如 Xenova/xxx，path.join 拼出该模型独立目录。
+  for (const spec of LOCAL_TRANSLATION_MODELS) {
+    if (!spec.platforms.includes('macos')) continue;
+    models.push({
+      kind: 'translation',
+      id: spec.id,
+      sizeBytes: dirSize(path.join(TRANSLATION_CACHE_DIR, spec.modelId)),
+      downloaded: localModelCached(TRANSLATION_CACHE_DIR, spec),
+      inUse: settings.translation.engine === spec.id,
+    });
+  }
   return models;
 });
 
@@ -476,9 +497,14 @@ ipcMain.handle(
           reconfigureAsr();
         }
       } else {
-        // 翻译模型：先 kill 翻译子进程释放文件句柄，再删缓存目录
-        reconfigureTranslate();
-        fs.rmSync(TRANSLATION_CACHE_DIR, { recursive: true, force: true });
+        // 翻译模型：只删该模型在 transformers 缓存中的子目录（<cacheDir>/<modelId>），不动其它模型。
+        const spec = getTranslationModel(id);
+        if (!spec) return { ok: false, error: '未知的翻译模型' };
+        // 删的是在用引擎时先 kill 翻译子进程释放文件句柄（下次 start/translate 按新设置重建）。
+        if (loadSettings().translation.engine === id) {
+          reconfigureTranslate();
+        }
+        fs.rmSync(path.join(TRANSLATION_CACHE_DIR, spec.modelId), { recursive: true, force: true });
       }
       return { ok: true };
     } catch (err) {

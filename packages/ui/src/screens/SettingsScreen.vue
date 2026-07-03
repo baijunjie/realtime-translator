@@ -3,7 +3,7 @@ import { reactive, ref, watch } from 'vue';
 import { NButton, NTooltip } from 'naive-ui';
 import { ArrowLeft, SlidersHorizontal, Mic, Languages, HardDrive } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
-import { M2M100_SPEC, getAsrModel } from '@rt/core';
+import { getAsrModel, getTranslationModel, DEFAULT_TRANSLATION_MODEL_ID } from '@rt/core';
 import { settings, saveSettings } from '../composables/useSettings';
 import { bridge } from '../bridge';
 import type { SettingsFormData } from '../components/settings/form';
@@ -30,13 +30,19 @@ const tabs = [
 const tab = ref<Tab>('general');
 
 const current = settings.value!;
+const currentEngine = current.translation.engine;
 const form = reactive<SettingsFormData>({
   nativeLang: current.nativeLang,
   fontSize: current.fontSize,
   theme: current.theme,
   asr: { ...current.asr },
-  // 三态：未开启翻译 → 无；开启 → 对应引擎（选了模型即视为开启，主页无独立开关）。
-  engine: current.translation.enabled ? current.translation.engine : 'none',
+  // 三态：未开启翻译 → 无；云端引擎 → 云端；其余本地引擎 → 本地模型（主页无独立开关，选方式即开启）。
+  translationMode: !current.translation.enabled ? 'none' : currentEngine === 'cloud' ? 'cloud' : 'local',
+  // 本地模型：持久化引擎为注册表内本地模型 id 则沿用，否则（云端/未知）落默认本地模型。
+  translationModel:
+    currentEngine !== 'cloud' && getTranslationModel(currentEngine)
+      ? currentEngine
+      : DEFAULT_TRANSLATION_MODEL_ID,
   cloud: { ...current.translation.cloud },
 });
 
@@ -51,9 +57,14 @@ let saveChain: Promise<unknown> = Promise.resolve();
 function persist(): Promise<unknown> {
   saveChain = saveChain.then(() => {
     const base = settings.value!;
-    // 三态映射回持久化：选「无」→ enabled=false（引擎保留原值）；选模型 → enabled=true + 该引擎。
-    const enabled = form.engine !== 'none';
-    const engine = form.engine === 'none' ? base.translation.engine : form.engine;
+    // 三态映射回持久化：无 → enabled=false（引擎保留原值）；云端 → engine='cloud'；本地 → engine=所选模型 id。
+    const enabled = form.translationMode !== 'none';
+    const engine =
+      form.translationMode === 'none'
+        ? base.translation.engine
+        : form.translationMode === 'cloud'
+          ? 'cloud'
+          : form.translationModel;
     // saveSettings 内部会重新应用语言/字体/主题，故设置页无需任何 preview 调用。
     return saveSettings({
       ...base,
@@ -75,7 +86,8 @@ watch(
     () => form.theme,
     () => form.asr.language,
     () => form.asr.model,
-    () => form.engine,
+    () => form.translationMode,
+    () => form.translationModel,
   ],
   () => {
     void persist();
@@ -103,10 +115,14 @@ function offerDownload(tasks: DownloadTask[]): void {
   downloadModalOpen.value = true;
 }
 
+// 切到本地方式、或本地方式下切换模型时，检查该本地模型是否就绪、未就绪则弹下载确认。
+// 任务的 nameKey/sizeBytes 取自所选 spec；平台无对应本地模型（如 iOS 系统翻译）则跳过。
 watch(
-  () => form.engine,
-  async (engine, prev) => {
-    if (engine !== 'm2m100' || prev === 'm2m100') return;
+  [() => form.translationMode, () => form.translationModel],
+  async ([mode]) => {
+    if (mode !== 'local') return;
+    const spec = getTranslationModel(form.translationModel);
+    if (!spec) return;
     await saveChain;
     const getStatus = bridge().getTranslationSetupStatus;
     if (getStatus && bridge().downloadTranslationModel) {
@@ -114,7 +130,7 @@ watch(
         const { ready } = await getStatus();
         if (!ready) {
           offerDownload([
-            { kind: 'translation', nameKey: 'models.m2m100', sizeBytes: M2M100_SPEC.approxDownloadBytes },
+            { kind: 'translation', nameKey: spec.nameKey, sizeBytes: spec.approxDownloadBytes },
           ]);
         }
       } catch {

@@ -1,6 +1,16 @@
 // planTranslation / normalizeZh / hasAllWeightFiles 的单元测试：三端共用的判定逻辑。
 import { describe, expect, it } from 'vitest';
-import { M2M100_SPEC, hasAllWeightFiles, normalizeZh, planTranslation } from './local-spec';
+import {
+  DEFAULT_TRANSLATION_MODEL_ID,
+  LOCAL_TRANSLATION_MODELS,
+  M2M100_SPEC,
+  MBART50_SPEC,
+  getTranslationModel,
+  hasAllWeightFiles,
+  normalizeZh,
+  planTranslation,
+  translationModelsFor,
+} from './local-spec';
 
 describe('hasAllWeightFiles 缓存完整性判据', () => {
   it('encoder + decoder 权重齐全（q8 带 _quantized 后缀）→ 完整', () => {
@@ -22,6 +32,61 @@ describe('hasAllWeightFiles 缓存完整性判据', () => {
 
   it('空列表 → 不完整', () => {
     expect(hasAllWeightFiles(M2M100_SPEC, [])).toBe(false);
+  });
+});
+
+describe('本地翻译模型注册表', () => {
+  it('默认模型存在于注册表且为本地全平台可用（macos + web）', () => {
+    const m = getTranslationModel(DEFAULT_TRANSLATION_MODEL_ID);
+    expect(m).toBe(M2M100_SPEC);
+    expect(m?.platforms).toEqual(expect.arrayContaining(['macos', 'web']));
+  });
+
+  it('getTranslationModel 未知 id 返回 undefined', () => {
+    expect(getTranslationModel('nllb')).toBeUndefined();
+    expect(getTranslationModel('cloud')).toBeUndefined();
+  });
+
+  it('每个模型都声明 nameKey、平台与权重文件', () => {
+    for (const m of LOCAL_TRANSLATION_MODELS) {
+      expect(m.nameKey).toMatch(/^models\./);
+      expect(m.platforms.length).toBeGreaterThan(0);
+      expect(m.weightFiles).toEqual(['encoder_model', 'decoder_model']);
+    }
+  });
+
+  it('translationModelsFor 按平台过滤：macos/web 含两款、ios 无本地模型', () => {
+    expect(translationModelsFor('macos').map((m) => m.id)).toEqual(['m2m100', 'mbart50']);
+    expect(translationModelsFor('web').map((m) => m.id)).toEqual(['m2m100', 'mbart50']);
+    expect(translationModelsFor('ios')).toEqual([]);
+  });
+});
+
+describe('mBART-50 语言码映射', () => {
+  const plan = (source: string, native: string, text: string) =>
+    planTranslation(MBART50_SPEC, source, native, text);
+
+  it('不同语言：携带 mBART-50 locale 风格目标码', () => {
+    expect((plan('en', 'ja', 'hello') as { targetCode: string }).targetCode).toBe('ja_XX');
+    expect((plan('ja', 'ko', 'こんにちは') as { targetCode: string }).targetCode).toBe('ko_KR');
+    const toZh = plan('ja', 'zh', 'こんにちは');
+    expect(toZh.kind).toBe('translate');
+    if (toZh.kind === 'translate') {
+      expect(toZh.targetCode).toBe('zh_CN');
+      expect(toZh.toScript?.('發現')).toBe('发现');
+    }
+  });
+
+  it('yue 与 zh 共用 zh_CN 但仍作不同语言 → translate（不 skip）', () => {
+    const p = plan('yue', 'zh', '早晨');
+    expect(p.kind).toBe('translate');
+    if (p.kind === 'translate') expect(p.targetCode).toBe('zh_CN');
+  });
+
+  it('未知目标语言：targetCode 回退 fallbackLang（en_XX）', () => {
+    const p = plan('ja', 'xx', 'こんにちは');
+    expect(p.kind).toBe('translate');
+    if (p.kind === 'translate') expect(p.targetCode).toBe('en_XX');
   });
 });
 

@@ -77,7 +77,7 @@ export interface TranslationFileProgress {
   total: number;
 }
 
-/** 翻译模型的加载状态（首次需联网下载约 600MB） */
+/** 翻译模型的加载状态（首次需联网下载数百 MB 权重） */
 export interface TranslationStatusPayload {
   state: 'loading' | 'ready' | 'error';
   /** 0~1 总进度（按全部文件的字节聚合，若有） */
@@ -110,7 +110,7 @@ export interface CloudTranslationConfig {
 }
 
 /** 本地翻译模型：即插即用，新增模型只加一份 spec（许可须可自由分发） */
-export type LocalEngine = 'm2m100';
+export type LocalEngine = 'm2m100' | 'mbart50';
 /** 翻译引擎：本地模型 + 云端 */
 export type TranslationEngine = LocalEngine | 'cloud';
 
