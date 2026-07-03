@@ -106,11 +106,11 @@ describe('withDefaults 字段补齐与校验', () => {
   it('引擎校验：cloud 与注册表本地模型 id 保留，未知值回落默认本地模型', () => {
     // 注册表内的本地模型 id 原样保留。
     expect(withDefaults({ translation: { engine: 'm2m100' } }, d).translation.engine).toBe('m2m100');
+    expect(withDefaults({ translation: { engine: 'mbart50' } }, d).translation.engine).toBe('mbart50');
     expect(withDefaults({ translation: { engine: 'cloud' } }, d).translation.engine).toBe('cloud');
-    // 未在注册表中的旧值/非法值/已下架 id 回落默认本地模型。
+    // 未在注册表中的旧值/非法值回落默认本地模型。
     expect(withDefaults({ translation: { engine: 'local' } }, d).translation.engine).toBe('m2m100');
     expect(withDefaults({ translation: { engine: 'nllb' } }, d).translation.engine).toBe('m2m100');
-    expect(withDefaults({ translation: { engine: 'mbart50' } }, d).translation.engine).toBe('m2m100');
   });
 
   describe('asr 语言与模型校验', () => {

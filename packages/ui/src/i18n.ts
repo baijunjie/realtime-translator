@@ -65,6 +65,7 @@ const messages = {
     },
     models: {
       m2m100: 'M2M-100 (Lightweight)',
+      mbart50: 'mBART-50 (Higher quality)',
       paraformerZh: 'Paraformer (Chinese)',
       parakeetEn: 'Parakeet (English)',
       reazonspeechJa: 'ReazonSpeech (Japanese)',
@@ -192,6 +193,7 @@ const messages = {
     },
     models: {
       m2m100: 'M2M-100（軽量）',
+      mbart50: 'mBART-50（高品質）',
       paraformerZh: 'Paraformer（中国語）',
       parakeetEn: 'Parakeet（英語）',
       reazonspeechJa: 'ReazonSpeech（日本語）',
@@ -318,6 +320,7 @@ const messages = {
     },
     models: {
       m2m100: 'M2M-100 (경량)',
+      mbart50: 'mBART-50 (고품질)',
       paraformerZh: 'Paraformer (중국어)',
       parakeetEn: 'Parakeet (영어)',
       reazonspeechJa: 'ReazonSpeech (일본어)',
@@ -442,6 +445,7 @@ const messages = {
     },
     models: {
       m2m100: 'M2M-100（轻量）',
+      mbart50: 'mBART-50（更高质量）',
       paraformerZh: 'Paraformer（中文专用）',
       parakeetEn: 'Parakeet（英文专用）',
       reazonspeechJa: 'ReazonSpeech（日语专用）',

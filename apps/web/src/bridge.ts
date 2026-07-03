@@ -7,7 +7,7 @@
 //  - 翻译：segment 到达且开启翻译时翻成母语，两种引擎与 macOS 对齐：
 //    · engine==='cloud' → @rt/core CloudTranslator（fetch OpenAI 兼容端点）。
 //    · 否则（本地）      → Transformers.js（浏览器内 WASM，见 ./translation），具体模型由注册表
-//      LOCAL_TRANSLATION_MODELS 按当前 engine 选定（默认 m2m100）。
+//      LOCAL_TRANSLATION_MODELS 按当前 engine 选定（默认 m2m100，可选 mbart50）。
 //    简繁等目标脚本后处理沿用所选 spec 的 toScript（两条路径一致）。
 //  - 麦克风权限：navigator.permissions.query；openMicSettings 浏览器无法打开系统设置，空实现。
 //  - ASR：Phase 2 真识别。getUserMedia + AudioWorklet 采麦（见 ./asr/web-asr），帧送进经典 Web Worker

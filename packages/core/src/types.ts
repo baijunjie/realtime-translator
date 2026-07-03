@@ -109,8 +109,8 @@ export interface CloudTranslationConfig {
   model: string;
 }
 
-/** 本地翻译模型：即插即用，新增模型只加一份 spec（许可须可自由分发，且 ja↔zh 等非英语直连方向实测可用） */
-export type LocalEngine = 'm2m100';
+/** 本地翻译模型：即插即用，新增模型只加一份 spec（许可须可自由分发） */
+export type LocalEngine = 'm2m100' | 'mbart50';
 /** 翻译引擎：本地模型 + 云端 */
 export type TranslationEngine = LocalEngine | 'cloud';
 
