@@ -3,8 +3,6 @@
 // 分配（如 NLLB 反量化的 ~1GB 分配在主进程会被 Chromium 分配器直接 abort）都被隔离在
 // 这里，翻译进程即便挂掉也不连累主窗口，主进程会在下次翻译时自动重启它。
 import { createTranslator, type Translator } from './translator';
-import { localSpecFor } from './local-translator';
-import { createTranslateProgressAggregator } from '@rt/core';
 import type {
   MainToTranslate,
   TranslateToMain,
@@ -47,18 +45,10 @@ function ensure(): Promise<Translator> {
   const instance = translator;
   if (!ready) {
     post({ type: 'status', payload: { state: 'loading' } });
-    // 模型由多个文件并行下载，经聚合器换成按字节聚合的总进度 + 各文件独立进度，避免逐文件来回跳；
-    // 本地引擎用 spec 的近似总字节预置分母，总进度不因文件陆续注册而回落（cloud 无进度事件，不预置）
-    const aggregate = createTranslateProgressAggregator(
-      config && config.engine !== 'cloud' ? localSpecFor(config.engine).approxDownloadBytes : undefined,
-    );
+    // 装载：把已下载的本地模型载入内存（未缓存则 init 直接报错，不联网），或云端引擎懒初始化。
+    // 下载不再经子进程，故无字节进度可报——只上报 loading/ready/error 状态。
     ready = instance
-      .init((p) => {
-        const agg = aggregate(p);
-        if (agg) {
-          post({ type: 'status', payload: { state: 'loading', progress: agg.progress, files: agg.files } });
-        }
-      })
+      .init()
       .then(() => post({ type: 'status', payload: { state: 'ready' } }))
       .catch((err) => {
         ready = null; // 允许下次重试
@@ -79,8 +69,8 @@ parentPort.on('message', (e: { data: MainToTranslate }) => {
       ready = null;
       break;
     case 'preheat':
-      // ensure 已就绪时不再自发状态；补发 ready 使显式下载（translation:download）的等待者必然兑现。
-      // 首次预热会与 ensure 内部的 ready 重复一次，UI 与等待者均幂等，无害。
+      // 仅装载模型入内存（降低首句翻译延迟）；补发 ready 使装载状态明确终结。
+      // 首次预热会与 ensure 内部的 ready 重复一次，UI 幂等，无害。
       ensure()
         .then(() => post({ type: 'status', payload: { state: 'ready' } }))
         .catch(() => {});

@@ -1,11 +1,11 @@
 <script lang="ts">
 /**
- * 一次下载任务：识别模型或本地翻译模型。sizeBytes 为近似体积（来自注册表），
- * 仅用于确认态展示；实际进度在下载态由各自的进度源上报。
+ * 一次下载任务：识别模型或本地翻译模型（均按注册表 id 参数化）。sizeBytes 为近似体积（来自
+ * 注册表），仅用于确认态展示；实际进度在下载态统一由 onSetupProgress 上报（asr/translation 一致）。
  */
 export type DownloadTask =
   | { kind: 'asr'; modelId: string; nameKey: string; sizeBytes: number }
-  | { kind: 'translation'; nameKey: string; sizeBytes: number };
+  | { kind: 'translation'; modelId: string; nameKey: string; sizeBytes: number };
 </script>
 
 <script setup lang="ts">
@@ -14,11 +14,6 @@ import { NModal, NProgress, NButton } from 'naive-ui';
 import { LoaderCircle } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
 import { bridge } from '../bridge';
-import {
-  translationDownloading,
-  translationProgress,
-  translationFiles,
-} from '../composables/useTranscription';
 import { humanBytes } from '../utils/bytes';
 
 const { t } = useI18n();
@@ -32,17 +27,17 @@ const phase = ref<Phase>('confirm');
 // 当前正在下载的任务下标（也是失败后重试的起点）
 const current = ref(0);
 
-// ASR 下载进度（聚合字节，来自 onSetupProgress）；翻译进度走全局 translation* ref。
-const asrLoaded = ref(0);
-const asrTotal = ref(0);
+// 当前任务的下载进度（聚合字节，来自 onSetupProgress）：ASR 与翻译统一同一套 loaded/total。
+const loaded = ref(0);
+const total = ref(0);
 
 // 每次弹窗打开都复位到确认态，避免复用上次的下载/失败态。
 watch(show, (v) => {
   if (v) {
     phase.value = 'confirm';
     current.value = 0;
-    asrLoaded.value = 0;
-    asrTotal.value = 0;
+    loaded.value = 0;
+    total.value = 0;
   }
 });
 
@@ -56,40 +51,17 @@ const modalTitle = computed(() => {
 });
 
 const currentTask = computed<DownloadTask | undefined>(() => props.tasks[current.value]);
-const isTranslation = computed(() => currentTask.value?.kind === 'translation');
 
-// 当前任务进度：ASR 用聚合字节，翻译用全局 0~100 进度；无进度信号时按 indeterminate 转圈。
+// 当前任务进度：聚合字节的百分比；尚无进度信号（total 为 0）时按 indeterminate 转圈。
 const percent = computed(() =>
-  isTranslation.value
-    ? translationProgress.value
-    : asrTotal.value > 0
-      ? Math.round((asrLoaded.value / asrTotal.value) * 100)
-      : 0,
+  total.value > 0 ? Math.round((loaded.value / total.value) * 100) : 0,
 );
-const indeterminate = computed(() =>
-  isTranslation.value
-    ? !translationDownloading.value || translationProgress.value === 0
-    : asrTotal.value === 0,
-);
-
-// 逐文件进度（仅翻译模型）：只列 ≥1MB 的文件，小配置文件秒完、列出只是噪音（仍计入总进度）。
-const MIN_FILE_BYTES = 1024 * 1024;
-const fileList = computed(() =>
-  isTranslation.value
-    ? translationFiles.value
-        .filter((f) => f.total >= MIN_FILE_BYTES)
-        .map((f) => ({
-          file: f.file,
-          name: f.file.split('/').pop() ?? f.file,
-          percent: Math.round(f.progress * 100),
-        }))
-    : [],
-);
+const indeterminate = computed(() => total.value === 0);
 
 // 组件级订阅：卸载时反注册，避免累积持有本组件 refs 的监听器。
 const offSetupProgress = bridge().onSetupProgress((p) => {
-  asrLoaded.value = p.loaded;
-  asrTotal.value = p.total;
+  loaded.value = p.loaded;
+  total.value = p.total;
 });
 onBeforeUnmount(offSetupProgress);
 
@@ -98,18 +70,14 @@ async function run(startIndex: number): Promise<void> {
   phase.value = 'downloading';
   for (let i = startIndex; i < props.tasks.length; i += 1) {
     current.value = i;
-    asrLoaded.value = 0;
-    asrTotal.value = 0;
+    loaded.value = 0;
+    total.value = 0;
     const task = props.tasks[i];
-    let res: { ok: boolean; error?: string };
-    if (task.kind === 'asr') {
-      res = await bridge().downloadAsrModels(task.modelId);
-    } else {
-      // 本页仅在桥接提供 downloadTranslationModel 时被打开（断言非空）；清零上次残留进度。
-      translationProgress.value = 0;
-      translationFiles.value = [];
-      res = await bridge().downloadTranslationModel!();
-    }
+    // 翻译任务仅在桥接提供 downloadTranslationModel 时才会入列（断言非空）。
+    const res =
+      task.kind === 'asr'
+        ? await bridge().downloadAsrModels(task.modelId)
+        : await bridge().downloadTranslationModel!(task.modelId);
     if (!res.ok) {
       phase.value = 'error';
       return;
@@ -161,7 +129,8 @@ function onCancel(): void {
       </div>
     </template>
 
-    <!-- 下载中：不可关闭，展示总进度（多任务时含「第 n/N 项」）与逐文件小进度条 -->
+    <!-- 下载中：不可关闭，展示总进度（多任务时含「第 n/N 项」）。逐文件进度不再展示，
+         下载进度归此弹窗、引擎装载状态归全局翻译状态，职责分离。 -->
     <template v-else-if="phase === 'downloading'">
       <div class="mb-2 flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400">
         <LoaderCircle :size="14" class="animate-spin" />
@@ -177,23 +146,6 @@ function onCancel(): void {
         :height="8"
         :processing="indeterminate"
       />
-      <div v-if="fileList.length" class="mt-3 space-y-1">
-        <div
-          v-for="f in fileList"
-          :key="f.file"
-          class="flex items-center gap-2 text-[11px] text-neutral-400 dark:text-neutral-500"
-        >
-          <span class="w-36 shrink-0 truncate font-mono">{{ f.name }}</span>
-          <n-progress
-            class="flex-1"
-            type="line"
-            :percentage="f.percent"
-            :show-indicator="false"
-            :height="4"
-          />
-          <span class="w-9 shrink-0 text-right tabular-nums">{{ f.percent }}%</span>
-        </div>
-      </div>
     </template>
 
     <!-- 失败：放弃（终止）或从失败项重试 -->

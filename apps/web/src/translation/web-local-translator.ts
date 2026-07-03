@@ -4,20 +4,10 @@
 import { M2M100_SPEC, type LocalModelSpec } from '@rt/core';
 import type { ToTranslateWorker, FromTranslateWorker } from './translate-worker-protocol';
 
-/** Transformers.js progress_callback 回吐的进度对象（结构稳定字段）。 */
-export interface ModelProgress {
-  status: string;
-  file?: string;
-  progress?: number; // 0~100（单文件）
-  loaded?: number;
-  total?: number;
-}
-
 export class WebLocalTranslator {
   private worker: Worker | null = null;
   private nextId = 1;
   private pending = new Map<number, { resolve: (t: string) => void; reject: (e: Error) => void }>();
-  private progressCb: ((p: ModelProgress) => void) | null = null;
   // 预热（翻译开启时：开关打开 / 启动时已开）：init→ready 的等待句柄，幂等复用。
   private warming: Promise<void> | null = null;
   private warmResolve: (() => void) | null = null;
@@ -54,9 +44,6 @@ export class WebLocalTranslator {
     w.onmessage = (ev: MessageEvent<FromTranslateWorker>) => {
       const m = ev.data;
       switch (m.type) {
-        case 'progress':
-          this.progressCb?.(m.progress as ModelProgress);
-          break;
         case 'ready':
           // 预热完成（响应 init）。
           this.warmResolve?.();
@@ -93,10 +80,9 @@ export class WebLocalTranslator {
     return w;
   }
 
-  /** 预热：加载/下载模型但不翻译（翻译开启时调用——开关打开或启动时已开，第一句不再等下载）。幂等。 */
-  warmUp(onProgress?: (p: ModelProgress) => void): Promise<void> {
+  /** 预热：把已下载的模型装载入内存但不翻译（翻译开启时调用，第一句不再等装载）。幂等。 */
+  warmUp(): Promise<void> {
     if (this.warming) return this.warming;
-    if (onProgress) this.progressCb = onProgress;
     const w = this.ensureWorker();
     this.warming = new Promise<void>((resolve, reject) => {
       this.warmResolve = resolve;
@@ -113,13 +99,9 @@ export class WebLocalTranslator {
   /**
    * 把 text 翻成 target（app 语言键 zh/en/ja/ko），经 spec.langs 映射到模型语言码。
    * 目标若需脚本后处理（中文母语归一化为简体）则套 toScript。
-   * onProgress 透传 worker 的模型下载进度（首次会下载数百 MB 权重）。
+   * 模型须已由下载链路落盘（Worker 内 allowRemoteModels=false）；未缓存时 worker 装载即报错。
    */
-  async translate(
-    text: string,
-    opts: { source?: string; target: string },
-    onProgress?: (p: ModelProgress) => void
-  ): Promise<string> {
+  async translate(text: string, opts: { source?: string; target: string }): Promise<string> {
     if (!text.trim()) return text;
     const src = this.entry(opts.source);
     const tgt = this.entry(opts.target);
@@ -129,7 +111,6 @@ export class WebLocalTranslator {
       return tgt.toScript ? tgt.toScript(text) : text;
     }
 
-    this.progressCb = onProgress ?? null;
     const w = this.ensureWorker();
     const id = this.nextId++;
     const result = await new Promise<string>((resolve, reject) => {

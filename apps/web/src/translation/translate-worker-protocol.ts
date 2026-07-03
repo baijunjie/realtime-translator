@@ -11,8 +11,6 @@ export type ToTranslateWorker =
 export type FromTranslateWorker =
   // 模型就绪（响应 init）。
   | { type: 'ready' }
-  // 模型下载进度（透传 Transformers.js 的 progress_callback 对象）。
-  | { type: 'progress'; progress: unknown }
   // 翻译结果。
   | { type: 'result'; id: number; text: string }
   // 出错（id=-1 表示初始化错误）。

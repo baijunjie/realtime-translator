@@ -15,4 +15,3 @@ export * from './translation/translator';
 export * from './translation/cloud-translator';
 export * from './translation/local-spec';
 export * from './translation/segment-translation';
-export * from './translation/progress';

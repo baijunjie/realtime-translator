@@ -3,8 +3,12 @@
 //
 // 协议见 ./translate-worker-protocol.ts。串行处理 translate（同一 ORT 会话不可并发）。
 /// <reference lib="webworker" />
-import { pipeline } from '@huggingface/transformers';
+import { pipeline, env } from '@huggingface/transformers';
 import type { ToTranslateWorker, FromTranslateWorker } from './translate-worker-protocol';
+
+// 离线加载：模型由自研下载链路（downloadTranslationModel）预先写入 Transformers.js 的 Cache API
+// 缓存（键为 HF resolve URL）。装载时不联网——未缓存则 pipeline() 直接报错，交由上层引导先下载。
+env.allowRemoteModels = false;
 
 type TranslationFn = (
   text: string,
@@ -31,7 +35,6 @@ function ensure(modelId: string, dtype: 'q8'): Promise<void> {
       dtype,
       // ORT-web 扩展图优化在该 q8 模型上会崩，关掉直接跑原始 QDQ 算子（详见 web-local-translator）。
       session_options: { graphOptimizationLevel: 'disabled' },
-      progress_callback: (p: unknown) => post({ type: 'progress', progress: p }),
     })
       .then((fn) => {
         translate$ = fn as unknown as TranslationFn;

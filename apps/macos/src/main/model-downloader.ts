@@ -16,7 +16,11 @@ export function asrModelsReady(modelsDir: string, modelId: string): boolean {
 // 「无进展超时」而非「总时长超时」——大文件慢速下载合法，只在字节流真正停滞时触发。
 const STALL_TIMEOUT_MS = 30_000;
 
-async function downloadFile(
+/**
+ * 流式下载单个文件到 dest（先写 .part 再原子 rename），带无进展看门狗。
+ * ASR 与翻译模型的自研下载链路共用此函数（翻译模型见 ./translation/model-downloader）。
+ */
+export async function downloadFile(
   url: string,
   dest: string,
   onBytes?: (loaded: number, total: number) => void

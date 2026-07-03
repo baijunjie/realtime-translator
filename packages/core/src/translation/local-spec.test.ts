@@ -54,6 +54,42 @@ describe('本地翻译模型注册表', () => {
     }
   });
 
+  it('每个模型的 files 清单非空、字段完整，且权重文件被 files 覆盖', () => {
+    for (const m of LOCAL_TRANSLATION_MODELS) {
+      expect(m.files.length).toBeGreaterThan(0);
+      expect(m.approxDownloadBytes).toBeGreaterThan(0);
+      for (const f of m.files) {
+        expect(f.url).toMatch(/^https:\/\//);
+        expect(f.filename.length).toBeGreaterThan(0);
+        // dir 为缓存布局子目录：'' 或形如 'onnx'（不含前后斜杠）
+        expect(f.dir).not.toMatch(/^\/|\/$/);
+        // url 末段即文件名（下载源直链，落地文件名与之一致）
+        expect(f.url.endsWith(f.filename)).toBe(true);
+      }
+      // spec.files 里的 .onnx 文件名整体覆盖 weightFiles 判据（离线加载所需权重齐全）。
+      const cachedNames = m.files.map((f) => (f.dir ? `${f.dir}/${f.filename}` : f.filename));
+      expect(hasAllWeightFiles(m, cachedNames)).toBe(true);
+    }
+  });
+
+  it('M2M100 files 与真实缓存布局一致：4 个根级 json + onnx/ 下的量化 encoder/decoder', () => {
+    const rels = M2M100_SPEC.files.map((f) => (f.dir ? `${f.dir}/${f.filename}` : f.filename));
+    expect(new Set(rels)).toEqual(
+      new Set([
+        'config.json',
+        'generation_config.json',
+        'tokenizer_config.json',
+        'tokenizer.json',
+        'onnx/encoder_model_quantized.onnx',
+        'onnx/decoder_model_merged_quantized.onnx',
+      ]),
+    );
+    // 下载源均指向 Xenova/m2m100_418M 仓的 main 分支 resolve 直链。
+    for (const f of M2M100_SPEC.files) {
+      expect(f.url).toContain('huggingface.co/Xenova/m2m100_418M/resolve/main/');
+    }
+  });
+
   it('translationModelsFor 按平台过滤：macos/web 可用、ios 无本地模型', () => {
     expect(translationModelsFor('macos').map((m) => m.id)).toEqual(['m2m100']);
     expect(translationModelsFor('web').map((m) => m.id)).toEqual(['m2m100']);

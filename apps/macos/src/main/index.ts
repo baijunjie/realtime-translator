@@ -26,6 +26,7 @@ import {
   type ModelKind,
 } from '@rt/core';
 import { localModelCached } from './translation/model-cache';
+import { downloadTranslationModel } from './translation/model-downloader';
 import { loadSettings, saveSettings } from './settings';
 import { asrModelsReady, downloadAsrModels } from './model-downloader';
 import { listArchives, getArchive, saveArchive, deleteArchive } from './archives';
@@ -77,13 +78,9 @@ interface TranslateChild {
 }
 let translateChild: TranslateChild | null = null;
 
-// 下载页显式下载本地翻译模型的在途等待者：单飞，多次调用复用同一 promise。
-// 下载进度经既有 translation:status 通道（子进程 status 转发）上报，UI 直接消费；
-// 完成/失败由子进程的首个终态（status ready/error）或异常退出兑现此等待者。
-let pendingModelDownload: {
-  promise: Promise<{ ok: boolean; error?: string }>;
-  resolve: (r: { ok: boolean; error?: string }) => void;
-} | null = null;
+// 本地翻译模型下载的在途任务表（按 modelId 单飞）：同一模型的重复下载复用同一 promise，
+// 避免并发写同一缓存目录。下载走自研链路（downloadTranslationModel），与翻译子进程无关。
+const translationDownloads = new Map<string, Promise<{ ok: boolean; error?: string }>>();
 
 // 当前选中的本地翻译模型 spec（引擎为 cloud 或未知本地 id 时无）。
 function currentTranslationSpec(): LocalModelSpec | undefined {
@@ -91,8 +88,8 @@ function currentTranslationSpec(): LocalModelSpec | undefined {
   return engine === 'cloud' ? undefined : getTranslationModel(engine);
 }
 
-// 当前选中的本地翻译模型是否已完整缓存：据此回答下载页「是否已缓存」，并在设置保存时门控自动预热。
-// 语义 =「当前选中的本地翻译模型」，与 getTranslationSetupStatus/downloadTranslationModel 契约一致。
+// 当前选中的本地翻译模型是否已完整缓存：仅用于设置保存/启动时门控自动预热（把磁盘模型载入内存）。
+// 下载页的「是否已缓存」改由参数化的 translation:setup-status 按 modelId 回答，与当前引擎无关。
 function translationModelCached(): boolean {
   const spec = currentTranslationSpec();
   return spec ? localModelCached(TRANSLATION_CACHE_DIR, spec) : false;
@@ -194,17 +191,6 @@ function startTranslateChild(): TranslateChild {
   proc.on('message', (m: TranslateToMain) => {
     if (m.type === 'status') {
       sendToRenderer('translation:status', m.payload);
-      // 显式下载等待者以**当前**子进程的首个终态兑现：ready → 成功；error → 失败
-      // （loading/进度不终结）。已被 reconfigure 替换的旧进程不参与兑现。
-      if (translateChild === handle && pendingModelDownload) {
-        if (m.payload.state === 'ready') {
-          pendingModelDownload.resolve({ ok: true });
-          pendingModelDownload = null;
-        } else if (m.payload.state === 'error') {
-          pendingModelDownload.resolve({ ok: false, error: m.payload.error });
-          pendingModelDownload = null;
-        }
-      }
     } else if (m.type === 'result') {
       pending.get(m.id)?.resolve(m.text);
       pending.delete(m.id);
@@ -225,12 +211,6 @@ function startTranslateChild(): TranslateChild {
       p.reject(new Error(`翻译进程退出 (${code})`));
     }
     pending.clear();
-    // 下载途中**当前**子进程退出（如模型内存过大崩溃）：兑现下载等待者为失败，供下载页重试。
-    // 已被 reconfigure 替换的旧进程退出不兑现——下载可能刚发往新进程，不能误判失败。
-    if (isCurrent && pendingModelDownload) {
-      pendingModelDownload.resolve({ ok: false, error: `翻译进程退出 (${code})` });
-      pendingModelDownload = null;
-    }
     if (code !== 0) {
       // 翻译进程异常退出（如模型内存过大崩溃）：主进程存活，提示失败，下次翻译自动重启
       sendToRenderer('translation:status', { state: 'error', error: `翻译进程异常退出 (${code})` });
@@ -513,30 +493,29 @@ ipcMain.handle(
   }
 );
 
-// 下载页：本地翻译模型是否已缓存（无需下载则 ready:true，可直接进入主界面）
-ipcMain.handle('translation:setup-status', (): { ready: boolean } => ({
-  ready: translationModelCached(),
-}));
-
-// 下载页：显式下载本地翻译模型，等待子进程完成初始化后兑现。进度经 translation:status 上报。
-ipcMain.handle('translation:download', (): Promise<{ ok: boolean; error?: string }> => {
-  // 云端引擎无本地模型可下载（UI 不会在 cloud 下路由到下载页，此处仅防御）
-  if (loadSettings().translation.engine === 'cloud') {
-    return Promise.resolve({ ok: true });
-  }
-  // 单飞：在途下载复用同一 promise，避免重复 preheat 与竞态兑现
-  if (pendingModelDownload) {
-    return pendingModelDownload.promise;
-  }
-  let resolve!: (r: { ok: boolean; error?: string }) => void;
-  const promise = new Promise<{ ok: boolean; error?: string }>((res) => {
-    resolve = res;
-  });
-  pendingModelDownload = { promise, resolve };
-  // 触发子进程按当前配置懒加载模型；未缓存时即为联网下载，加载/下载进度经 status 转发到下载页
-  ensureTranslateChild().proc.postMessage({ type: 'preheat' });
-  return promise;
+// 下载页/录音前检查：指定本地翻译模型（按 id，与当前引擎无关）是否已完整缓存。
+ipcMain.handle('translation:setup-status', (_event, modelId: string): { ready: boolean } => {
+  const spec = getTranslationModel(modelId);
+  return { ready: spec ? localModelCached(TRANSLATION_CACHE_DIR, spec) : false };
 });
+
+// 下载页：显式下载指定本地翻译模型（自研链路，与翻译子进程无关）。进度经 setup:progress 上报，
+// 与 ASR 完全一致；按 modelId 单飞（在途同模型复用 promise）。
+ipcMain.handle(
+  'translation:download',
+  (_event, modelId: string): Promise<{ ok: boolean; error?: string }> => {
+    const inflight = translationDownloads.get(modelId);
+    if (inflight) return inflight;
+    const promise = downloadTranslationModel(TRANSLATION_CACHE_DIR, modelId, (p) =>
+      sendToRenderer('setup:progress', p)
+    )
+      .then(() => ({ ok: true }))
+      .catch((err: unknown) => ({ ok: false, error: (err as Error).message }))
+      .finally(() => translationDownloads.delete(modelId));
+    translationDownloads.set(modelId, promise);
+    return promise;
+  }
+);
 
 ipcMain.on('pipeline:audio', (_event, samples: Float32Array) => {
   if (!asrChild) return;

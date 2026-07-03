@@ -28,9 +28,7 @@ import {
   LOCAL_TRANSLATION_MODELS,
   DEFAULT_TRANSLATION_MODEL_ID,
   getTranslationModel,
-  hasAllWeightFiles,
   translateFinalizedSegment,
-  createTranslateProgressAggregator,
   createCallbackHub,
   ASR_MODELS,
   getAsrModel,
@@ -63,7 +61,13 @@ import {
   deleteAsrModelFromCache,
   ASR_MODEL_CACHE_NAME,
 } from './asr/model-store';
-import { WebLocalTranslator, type ModelProgress } from './translation/web-local-translator';
+import { WebLocalTranslator } from './translation/web-local-translator';
+import {
+  TRANSFORMERS_CACHE_NAME,
+  isTranslationModelCached,
+  ensureTranslationModelCached,
+  deleteTranslationModelFromCache,
+} from './translation/model-store';
 import { isIOS } from './platform';
 
 const DB_NAME = 'realtime-translator';
@@ -71,40 +75,6 @@ const DB_VERSION = 1;
 const KV_STORE = 'kv'; // 设置等单键值
 const ARCHIVE_STORE = 'archives'; // 归档记录，keyPath = id
 const SETTINGS_KEY = 'settings';
-
-// Transformers.js（本项目 v4.2.0）在浏览器端默认用 Cache API 缓存模型，缓存名取 env.cacheKey，
-// 默认值即 'transformers-cache'（本项目未改此配置）。每个模型文件以其 HuggingFace 解析 URL 作
-// Request key，形如 https://huggingface.co/<modelId>/resolve/main/<file>；q8 权重文件名带
-// _quantized 后缀（如 onnx/decoder_model_merged_quantized.onnx）。据此判断本地翻译模型是否已缓存。
-const TRANSFORMERS_CACHE_NAME = 'transformers-cache';
-
-// 指定本地翻译模型是否已在 Cache Storage 里：spec 的全部权重（encoder+decoder）都有
-// 对应 .onnx 条目才算就绪——Cache Storage 按条目逐出，只查任一权重会把部分逐出误判为已就绪。
-// Cache API 不可用或查询异常时返回 false——宁可多走一次下载页（页内命中缓存会瞬间完成），
-// 也不误判为已就绪而在缺模型时跳过下载。
-async function isTranslationModelCached(spec: LocalModelSpec): Promise<boolean> {
-  if (typeof caches === 'undefined') return false;
-  try {
-    const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
-    const urls = (await cache.keys())
-      .map((req) => req.url)
-      .filter((u) => u.includes(spec.modelId));
-    return hasAllWeightFiles(spec, urls);
-  } catch {
-    return false;
-  }
-}
-
-// 删除 Transformers.js 缓存里属于指定本地翻译模型的全部条目：按 URL 含 modelId 逐条删，
-// 不清整个缓存（同缓存名可能存放其它模型/资源）。删后对应翻译器实例须置空重建。
-async function deleteTranslationModelFromCache(spec: LocalModelSpec): Promise<void> {
-  if (typeof caches === 'undefined') return;
-  const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
-  const keys = await cache.keys();
-  await Promise.all(
-    keys.filter((req) => req.url.includes(spec.modelId)).map((req) => cache.delete(req)),
-  );
-}
 
 // iOS/iPadOS 的 WebKit 单标签页内存装不下本地翻译模型（与 ASR 共存会崩，且 4-bit 量化在
 // ORT-web 里也跑不起来），故这些设备不提供本地翻译、引擎恒为云端。所有产出 settings 的
@@ -164,27 +134,14 @@ export function createWebBridge(): AppBridge {
     return localTranslator;
   }
 
-  // —— 本地模型预热（只下载/装载不翻译）：进度经 onTranslationStatus 上报，warmUp 幂等、重复调用安全。
-  //    状态回调在内部完成 loading→ready/error 的上报；同时把失败向上抛，供显式下载页（downloadTranslationModel）
-  //    据返回值判定 done/failed。不关心结果的调用方（保存/启动预热）自行 .catch 吞掉即可（错误已上报）。 ——
+  // —— 本地模型预热（只装载不翻译）：把已下载的模型从 Cache Storage 读入内存（Worker 内
+  //    allowRemoteModels=false，未缓存直接报错、绝不联网）。状态经 onTranslationStatus 上报
+  //    loading→ready/error，不带字节进度（下载进度归 onSetupProgress，见 downloadTranslationModel）。
+  //    warmUp 幂等、重复调用安全；失败向上抛，供不关心结果的调用方自行 .catch 吞掉（错误已上报）。 ——
   async function warmUpLocalModel(): Promise<void> {
-    const spec = currentTranslationSpec();
-    // 已缓存：只是把模型从缓存读入内存——Transformers.js 读缓存时也发进度事件，
-    // 若照报会让 UI 每次装载都显示「下载中」，故抑制；未缓存才是真下载，报进度。
-    const reportProgress = !(await isTranslationModelCached(spec));
     translationStatusCb.emit({ state: 'loading' });
-    // 模型由多个文件并行下载，逐文件百分比会让单一进度条来回跳；经聚合器换成按字节聚合的
-    // 总进度 + 各文件独立进度，每次加载新建一个（ModelProgress 与 TranslateProgress 同形）。
-    // 用当前 spec 的近似总字节预置分母，总进度不因文件陆续注册而回落。
-    const aggregate = createTranslateProgressAggregator(spec.approxDownloadBytes);
     return getLocalTranslator()
-      .warmUp((p) => {
-        if (!reportProgress) return;
-        const agg = aggregate(p);
-        if (agg) {
-          translationStatusCb.emit({ state: 'loading', progress: agg.progress, files: agg.files });
-        }
-      })
+      .warmUp()
       .then(() => {
         translationStatusCb.emit({ state: 'ready' });
       })
@@ -283,15 +240,11 @@ export function createWebBridge(): AppBridge {
           });
         }
         // 本地 target 同样传 app 语言键：translate 内部按 langs 条目映射模型码并做字形归一化。
-        return getLocalTranslator().translate(
-          req.text,
-          { source: req.source, target: req.targetLang },
-          (p: ModelProgress) => {
-            if (p.status === 'progress' && typeof p.progress === 'number') {
-              translationStatusCb.emit({ state: 'loading', progress: p.progress / 100 });
-            }
-          },
-        );
+        // 模型已由下载链路落盘、装载走 warmUp 上报状态，翻译热路径不再关心加载进度。
+        return getLocalTranslator().translate(req.text, {
+          source: req.source,
+          target: req.targetLang,
+        });
       },
       emitTranslation: (p) => translationCb.emit(p),
     });
@@ -490,17 +443,25 @@ export function createWebBridge(): AppBridge {
     },
 
     // ===== 本地翻译模型（M2M100，Transformers.js Cache API 缓存） =====
-    async getTranslationSetupStatus(): Promise<{ ready: boolean }> {
-      // 查 Transformers.js 缓存里是否已有**当前选中**本地模型的 onnx 权重（详见 isTranslationModelCached）。
-      // 未缓存则 UI 在开启本地翻译时先进翻译模型下载页。
-      return { ready: await isTranslationModelCached(currentTranslationSpec()) };
+    async getTranslationSetupStatus(modelId: string): Promise<{ ready: boolean }> {
+      // 查 Transformers.js 缓存里是否已有指定模型（按 id，与当前引擎无关）的 onnx 权重。
+      // 未知/非 web 平台模型视为未就绪。未缓存则 UI 在开启本地翻译/录音前先下载该模型。
+      const spec = getTranslationModel(modelId);
+      if (!spec || !spec.platforms.includes('web')) return { ready: false };
+      return { ready: await isTranslationModelCached(spec) };
     },
-    async downloadTranslationModel(): Promise<{ ok: boolean; error?: string }> {
-      // 显式下载/装载本地翻译模型：复用 warmUpLocalModel 的单飞加载路径（进度经 onTranslationStatus
-      // 上报），await 其完成；成功返回 ok，异常返回 error 供下载页重试。不另起加载路径以免与
-      // warmUp 单飞逻辑打架。首次会下数百 MB 权重，命中缓存则仅装载入内存、瞬间完成。
+    async downloadTranslationModel(modelId: string): Promise<{ ok: boolean; error?: string }> {
+      // 自研下载指定本地翻译模型（与 ASR 一致）：按注册表逐个下载文件到 Transformers.js 缓存布局，
+      // 进度经 setupProgressCb 回吐 { loaded, total }。首次下数百 MB 权重，命中缓存则秒回。
+      // 装载入内存由后续 warmUp/翻译触发，与下载解耦。
+      const spec = getTranslationModel(modelId);
+      if (!spec || !spec.platforms.includes('web')) {
+        return { ok: false, error: '未知的翻译模型' };
+      }
       try {
-        await warmUpLocalModel();
+        await ensureTranslationModelCached(spec, (p) =>
+          setupProgressCb.emit({ loaded: p.loaded, total: p.total }),
+        );
         return { ok: true };
       } catch (e) {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };

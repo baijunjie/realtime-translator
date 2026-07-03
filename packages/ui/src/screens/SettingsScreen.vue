@@ -127,10 +127,10 @@ watch(
     const getStatus = bridge().getTranslationSetupStatus;
     if (getStatus && bridge().downloadTranslationModel) {
       try {
-        const { ready } = await getStatus();
+        const { ready } = await getStatus(spec.id);
         if (!ready) {
           offerDownload([
-            { kind: 'translation', nameKey: spec.nameKey, sizeBytes: spec.approxDownloadBytes },
+            { kind: 'translation', modelId: spec.id, nameKey: spec.nameKey, sizeBytes: spec.approxDownloadBytes },
           ]);
         }
       } catch {

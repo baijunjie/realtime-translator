@@ -65,7 +65,7 @@ function download(m: ModelInfo): void {
             sizeBytes: registryBytes(m),
           },
         ]
-      : [{ kind: 'translation', nameKey: getTranslationModel(m.id)?.nameKey ?? m.id, sizeBytes: registryBytes(m) }];
+      : [{ kind: 'translation', modelId: m.id, nameKey: getTranslationModel(m.id)?.nameKey ?? m.id, sizeBytes: registryBytes(m) }];
   downloadModalOpen.value = true;
 }
 

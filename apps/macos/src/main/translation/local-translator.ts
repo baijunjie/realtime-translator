@@ -3,17 +3,12 @@
 // 翻译流程（懒加载 / 缓存判定 / 语言码映射 / 简繁脚本回退）完全通用，做到优雅插拔。
 // 模型规格 / 语言映射 / 简繁归一化是平台无关的，已下沉到 @rt/core，这里只保留依赖原生模块的执行层。
 import { pipeline, env } from '@huggingface/transformers';
-import {
-  getTranslationModel,
-  type LocalModelSpec,
-  type Translator,
-  type TranslateProgress,
-} from '@rt/core';
+import { getTranslationModel, type LocalModelSpec, type Translator } from '@rt/core';
 import { localModelCached } from './model-cache';
 import type { LocalEngine } from '../../shared/types';
 
-/** 某本地引擎的模型规格（进度分母预置等场景使用）；未知引擎抛错（应由校验层拦住）。 */
-export function localSpecFor(engine: LocalEngine): LocalModelSpec {
+/** 某本地引擎的模型规格；未知引擎抛错（应由校验层拦住）。 */
+function localSpecFor(engine: LocalEngine): LocalModelSpec {
   const spec = getTranslationModel(engine);
   if (!spec) {
     throw new Error(`未知的本地翻译模型: ${engine}`);
@@ -42,7 +37,9 @@ class LocalTranslator implements Translator {
     private readonly cacheDir: string
   ) {
     env.cacheDir = cacheDir;
-    env.allowRemoteModels = true;
+    // 离线加载：模型由自研下载链路（translation:download）预先落盘，装载时不联网。
+    // 未缓存则在 init 里显式报错（录音前检查会引导先下载），绝不在此静默联网拉取大模型。
+    env.allowRemoteModels = false;
   }
 
   /** 取某 app 语言在本模型下的处理项，未知语言回退 */
@@ -55,16 +52,15 @@ class LocalTranslator implements Translator {
     return localModelCached(this.cacheDir, this.spec);
   }
 
-  init(onProgress?: (p: TranslateProgress) => void): Promise<void> {
+  init(): Promise<void> {
     if (this.translate$) return Promise.resolve();
     if (!this.loading) {
-      // 已缓存：只是把模型从磁盘载入内存，不报字节进度（避免每次启动都显示像下载的 %）。
-      // 未缓存：首次联网下载，报进度。
-      const reportProgress = this.isCached() ? undefined : onProgress;
-      this.loading = pipeline('translation', this.spec.modelId, {
-        dtype: this.spec.dtype,
-        progress_callback: reportProgress,
-      })
+      // 未缓存：不联网下载（allowRemoteModels=false 也会拒绝），直接报错交由上层引导下载。
+      if (!this.isCached()) {
+        return Promise.reject(new Error('本地翻译模型未下载，请先在模型管理页下载'));
+      }
+      // 已缓存：把模型从磁盘载入内存（离线，不报字节进度）。
+      this.loading = pipeline('translation', this.spec.modelId, { dtype: this.spec.dtype })
         .then((fn) => {
           this.translate$ = fn as unknown as TranslationFn;
         })

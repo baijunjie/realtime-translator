@@ -1,5 +1,5 @@
 import { nextTick, reactive, ref } from 'vue';
-import type { PipelineErrorCode, TranslationFileProgress } from '@rt/core';
+import type { PipelineErrorCode } from '@rt/core';
 import { fmtClock } from '../utils/datetime';
 import { bridge } from '../bridge';
 
@@ -25,12 +25,8 @@ export const modelLoading = ref(false);
 export const errorText = ref('');
 export const errorCode = ref<PipelineErrorCode | null>(null);
 
-// 翻译模型状态（独立，显示在翻译开关旁，不影响录音）
+// 翻译引擎装载状态（独立，显示在顶栏，不影响录音）。下载进度不在此，走 onSetupProgress（下载弹窗消费）。
 export const translationLoading = ref(false);
-export const translationDownloading = ref(false); // true=首次下载(有进度)，false=载入内存
-export const translationProgress = ref(0); // 0~100
-// 各文件独立下载进度（下载页逐文件展示进度条），仅 loading 阶段有值，ready/error 清空
-export const translationFiles = ref<TranslationFileProgress[]>([]);
 export const translationError = ref(false);
 
 // 录音开始时的本地时刻（epoch ms），用于把片段的相对偏移换算成本地时钟时间
@@ -121,25 +117,16 @@ export function registerTranscriptionListeners(): void {
   });
   bridge().onTranslationStatus((s) => {
     if (s.state === 'loading') {
+      // 装载模型入内存（无字节进度；下载进度另经 onSetupProgress 上报给下载弹窗）。
       translationLoading.value = true;
       translationError.value = false;
-      // 有进度=正在下载文件；无进度=从缓存载入内存
-      if (typeof s.progress === 'number') {
-        translationDownloading.value = true;
-        translationProgress.value = Math.round(s.progress * 100);
-      }
-      if (s.files) translationFiles.value = s.files;
     } else if (s.state === 'error') {
       translationLoading.value = false;
-      translationDownloading.value = false;
-      translationFiles.value = [];
       translationError.value = true;
       // 翻译失败（含子进程崩溃）：结束所有仍在等待的译文动画，避免永久转圈
       for (const l of lines) l.translating = false;
     } else if (s.state === 'ready') {
       translationLoading.value = false;
-      translationDownloading.value = false;
-      translationFiles.value = [];
       translationError.value = false; // 引擎恢复就绪，清除全局失败提示
     }
   });

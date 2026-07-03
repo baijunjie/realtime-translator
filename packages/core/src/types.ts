@@ -65,25 +65,13 @@ export interface StartResult {
   code?: PipelineErrorCode;
 }
 
-/** 翻译模型单个文件的下载进度（模型由多个文件组成，供 UI 逐文件展示独立进度条） */
-export interface TranslationFileProgress {
-  /** 文件相对路径（如 onnx/encoder_model_quantized.onnx） */
-  file: string;
-  /** 该文件的 0~1 进度 */
-  progress: number;
-  /** 已下载字节 */
-  loaded: number;
-  /** 总字节 */
-  total: number;
-}
-
-/** 翻译模型的加载状态（首次需联网下载数百 MB 权重） */
+/**
+ * 翻译引擎的装载状态（把已下载的本地模型载入内存，或云端引擎的懒初始化）。
+ * 仅表达 loading/ready/error，不带下载字节进度——下载进度走 onSetupProgress（与 ASR 一致），
+ * 下载与装载职责分离：下载进度归下载弹窗，引擎装载状态归全局翻译状态。
+ */
 export interface TranslationStatusPayload {
   state: 'loading' | 'ready' | 'error';
-  /** 0~1 总进度（按全部文件的字节聚合，若有） */
-  progress?: number;
-  /** 各文件独立进度（若有）；文件按发现顺序排列 */
-  files?: TranslationFileProgress[];
   error?: string;
 }
 

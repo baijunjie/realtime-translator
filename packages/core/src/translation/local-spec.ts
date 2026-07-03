@@ -26,11 +26,28 @@ export interface LangEntry {
   toScript?: (text: string) => string;
 }
 
+/**
+ * 本地翻译模型的单个待下载文件（自研下载链路：按 URL 下载，落入 Transformers.js 的缓存布局后
+ * 以 allowRemoteModels=false 离线加载）。与 ASR 的 AsrModelFile 同理——注册表声明 URL，各端自行下载。
+ */
+export interface LocalModelFile {
+  /** 远程下载地址（当前为 HF resolve 直链；后续大模型可换 GitHub Releases 直链，与缓存键解耦）。 */
+  url: string;
+  /** 落地文件名（如 encoder_model_quantized.onnx）。 */
+  filename: string;
+  /**
+   * Transformers.js 缓存布局内、相对 `<cacheDir>/<modelId>/` 的子目录（'' 或 'onnx'）。
+   * macOS 据此拼本地路径 `<cacheDir>/<modelId>/<dir>/<filename>`；Web 据此构造 Transformers.js
+   * 将要请求的缓存键（HF resolve URL），从而与下载源 URL 解耦。
+   */
+  dir: string;
+}
+
 export interface LocalModelSpec {
   id: LocalEngine;
   /** UI 端 i18n 显示名 key（形如 models.m2m100）。 */
   nameKey: string;
-  /** HuggingFace 仓库标识（首次联网下载后离线复用） */
+  /** HuggingFace 仓库标识：既是 Transformers.js 的模型 id，也是缓存布局的根目录名。 */
   modelId: string;
   /** 量化档位 */
   dtype: 'q8';
@@ -40,8 +57,13 @@ export interface LocalModelSpec {
    */
   weightFiles: string[];
   /**
-   * 全部需下载文件的近似总字节（非精确值），用于预置下载进度聚合器的分母：
-   * 从第一个进度事件起分母即为全量，总进度不因文件陆续注册而回落。
+   * 该模型全部需下载文件（权重 + tokenizer/config）。自研下载器按此逐个下载，落入
+   * Transformers.js 缓存布局后离线加载。清单以本机真实缓存为准枚举，缺任一文件都会导致离线加载失败。
+   */
+  files: LocalModelFile[];
+  /**
+   * 全部需下载文件的近似总字节（非精确值），用作下载进度分母：各文件不必单独记大小，
+   * loaded 跨文件累计即可。分母从第一个进度事件起即为全量，总进度不因文件陆续下载而回落。
    */
   approxDownloadBytes: number;
   /** app 语言（含 ASR 源码 yue）→ 处理方式；未列出的语言回退到 fallbackLang */
@@ -58,14 +80,31 @@ export function hasAllWeightFiles(spec: LocalModelSpec, cached: string[]): boole
 }
 
 // M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
+const M2M100_REPO = 'Xenova/m2m100_418M';
+/** 构造 M2M100 的一个待下载文件：URL 为该仓 main 分支的 resolve 直链，dir 为缓存布局子目录。 */
+function m2m100File(dir: string, filename: string): LocalModelFile {
+  const rel = dir ? `${dir}/${filename}` : filename;
+  return { url: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`, filename, dir };
+}
+
 export const M2M100_SPEC: LocalModelSpec = {
   id: 'm2m100',
   nameKey: 'models.m2m100',
-  modelId: 'Xenova/m2m100_418M',
+  modelId: M2M100_REPO,
   dtype: 'q8',
   // seq2seq 双权重：encoder + merged decoder（q8 档文件名带 _quantized 后缀，用特征串匹配）
   weightFiles: ['encoder_model', 'decoder_model'],
-  approxDownloadBytes: 630_000_000, // q8 encoder+decoder+tokenizer 等合计约 630MB
+  // 文件清单以本机真实缓存为准枚举（Transformers.js q8 档实际拉取的完整集合）：4 个 tokenizer/config
+  // 小文件 + onnx/ 下的量化 encoder/decoder。按体积升序排列（小文件先下，早暴露连接问题）。
+  files: [
+    m2m100File('', 'config.json'),
+    m2m100File('', 'generation_config.json'),
+    m2m100File('', 'tokenizer_config.json'),
+    m2m100File('', 'tokenizer.json'),
+    m2m100File('onnx', 'encoder_model_quantized.onnx'),
+    m2m100File('onnx', 'decoder_model_merged_quantized.onnx'),
+  ],
+  approxDownloadBytes: 640_000_000, // 上列文件合计约 640MB（q8 encoder ~288MB + decoder ~344MB + tokenizer 等）
   fallbackLang: 'en',
   langs: {
     // 中文母语：产出/原文一律归一化为简体（模型输出偶带繁体字形）。

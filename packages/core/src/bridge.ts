@@ -86,16 +86,16 @@ export interface AppBridge {
   /** 删除某个已下载模型，返回结果（失败带 error） */
   deleteModel(kind: ModelKind, id: string): Promise<{ ok: boolean; error?: string }>;
   /**
-   * 本地翻译模型是否已下载到本地缓存。仅当平台需要自行下载本地翻译模型时提供
-   * （macOS / Web 的 M2M100）；缺省表示无需下载（如 iOS 走系统翻译，语言包由系统管理）。
-   * UI 据此在开启本地翻译时决定是否先进入翻译模型下载页。
+   * 指定本地翻译模型（按注册表 id，语义与当前选中引擎无关）是否已下载到本地缓存。
+   * 仅当平台需要自行下载本地翻译模型时提供（macOS / Web 的 M2M100）；缺省表示无需下载
+   * （如 iOS 走系统翻译，语言包由系统管理）。UI 据此在开启本地翻译/录音前决定是否先下载该模型。
    */
-  getTranslationSetupStatus?(): Promise<{ ready: boolean }>;
+  getTranslationSetupStatus?(modelId: string): Promise<{ ready: boolean }>;
   /**
-   * 下载本地翻译模型：进度经 onTranslationStatus（loading + progress）上报，
-   * 完成/失败由返回值表达（失败带 error 供重试）。与 getTranslationSetupStatus 成对提供。
+   * 下载指定本地翻译模型（按注册表 id）：与 ASR 下载同一套自研链路，进度经 onSetupProgress
+   * （loaded/total）上报，完成/失败由返回值表达（失败带 error 供重试）。与 getTranslationSetupStatus 成对提供。
    */
-  downloadTranslationModel?(): Promise<{ ok: boolean; error?: string }>;
+  downloadTranslationModel?(modelId: string): Promise<{ ok: boolean; error?: string }>;
   /** 归档：保存一次对话，返回更新后的列表 */
   saveArchive(name: string, lines: ArchiveLine[]): Promise<ArchiveSummary[]>;
   listArchives(): Promise<ArchiveSummary[]>;

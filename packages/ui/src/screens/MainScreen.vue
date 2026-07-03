@@ -17,7 +17,6 @@ import {
   toggleRecording,
   clearTranscript,
   translationLoading,
-  translationDownloading,
   translationError,
 } from '../composables/useTranscription';
 import TranscriptList from '../components/TranscriptList.vue';
@@ -94,9 +93,8 @@ const canForceUpdate = typeof bridge().forceUpdateApp === 'function';
 const loadingItems = computed<string[]>(() => {
   const items: string[] = [];
   if (modelLoading.value) items.push(t('status.loadingModel'));
-  if (translateOn.value && translationLoading.value) {
-    items.push(translationDownloading.value ? t('status.transDownloading') : t('status.transLoading'));
-  }
+  // 翻译引擎装载中（下载进度另在下载弹窗展示，此处只表达装载入内存）。
+  if (translateOn.value && translationLoading.value) items.push(t('status.transLoading'));
   return items;
 });
 const loadingSummary = computed(() =>
@@ -205,13 +203,13 @@ async function onRecordClick(): Promise<void> {
   } catch {
     /* 查询失败不拦截，按已就绪继续 */
   }
-  // 本地翻译模型：开启翻译且用本地引擎、桥接需自行下载且未就绪时加下载任务
+  // 本地翻译模型：开启翻译且用本地引擎、桥接需自行下载且未就绪时加下载任务（按引擎 id，此时必为本地 id）
   const getTrStatus = bridge().getTranslationSetupStatus;
   const trSpec = s.translation.engine !== 'cloud' ? getTranslationModel(s.translation.engine) : undefined;
   if (s.translation.enabled && trSpec && getTrStatus && bridge().downloadTranslationModel) {
     try {
-      const { ready } = await getTrStatus();
-      if (!ready) tasks.push({ kind: 'translation', nameKey: trSpec.nameKey, sizeBytes: trSpec.approxDownloadBytes });
+      const { ready } = await getTrStatus(trSpec.id);
+      if (!ready) tasks.push({ kind: 'translation', modelId: trSpec.id, nameKey: trSpec.nameKey, sizeBytes: trSpec.approxDownloadBytes });
     } catch {
       /* 查询失败不拦截，按已就绪继续 */
     }
