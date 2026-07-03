@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue';
-import { NButton } from 'naive-ui';
+import { NButton, NTooltip } from 'naive-ui';
 import { ArrowLeft, Trash2 } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
 import type { ArchiveSummary, ArchiveRecord } from '@rt/core';
@@ -42,9 +42,14 @@ onMounted(async () => {
     <header
       class="flex items-center gap-3 border-b border-neutral-200 px-[18px] py-3 dark:border-[#3a3b44]"
     >
-      <n-button quaternary circle :title="t('settings.back')" @click="back">
-        <template #icon><ArrowLeft :size="18" /></template>
-      </n-button>
+      <n-tooltip>
+        <template #trigger>
+          <n-button quaternary circle :aria-label="t('settings.back')" @click="back">
+            <template #icon><ArrowLeft :size="18" /></template>
+          </n-button>
+        </template>
+        {{ t('settings.back') }}
+      </n-tooltip>
       <span class="truncate text-[15px] font-semibold">
         {{ selected ? selected.name : t('archive.title') }}
       </span>
@@ -91,9 +96,14 @@ onMounted(async () => {
               {{ it.lastLine }}
             </div>
           </button>
-          <n-button quaternary circle size="small" :title="t('archive.delete')" @click="remove(it.id)">
-            <template #icon><Trash2 :size="16" /></template>
-          </n-button>
+          <n-tooltip>
+            <template #trigger>
+              <n-button quaternary circle size="small" :aria-label="t('archive.delete')" @click="remove(it.id)">
+                <template #icon><Trash2 :size="16" /></template>
+              </n-button>
+            </template>
+            {{ t('archive.delete') }}
+          </n-tooltip>
         </li>
       </ul>
     </ScrollArea>

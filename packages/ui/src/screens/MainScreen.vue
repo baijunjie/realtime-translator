@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, h } from 'vue';
-import { NButton, NModal, NInput, NDropdown } from 'naive-ui';
+import { NButton, NModal, NInput, NDropdown, NTooltip } from 'naive-ui';
 import type { DropdownMixedOption } from 'naive-ui/es/dropdown/src/interface';
 import { Settings, Trash2, Archive, Library, Eraser, LoaderCircle, TriangleAlert, MoreHorizontal, Mic, MonitorSpeaker, Square, RefreshCw } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
@@ -260,32 +260,56 @@ function openMicSettings(): void {
       <div class="flex items-center gap-3.5 max-sm:hidden">
         <!-- NDropdown 无 disabled 属性：无内容时直接渲染禁用按钮，避免空状态仍能弹出菜单 -->
         <n-dropdown v-if="hasContent" trigger="click" :options="clearOptions" @select="onClearSelect">
-          <n-button quaternary circle :title="t('main.clear')">
-            <template #icon><Eraser :size="18" /></template>
-          </n-button>
+          <n-tooltip>
+            <template #trigger>
+              <n-button quaternary circle :aria-label="t('main.clear')">
+                <template #icon><Eraser :size="18" /></template>
+              </n-button>
+            </template>
+            {{ t('main.clear') }}
+          </n-tooltip>
         </n-dropdown>
-        <n-button v-else quaternary circle disabled :title="t('main.clear')">
-          <template #icon><Eraser :size="18" /></template>
-        </n-button>
-        <n-button quaternary circle :title="t('main.viewArchives')" @click="$emit('open-archive')">
-          <template #icon><Library :size="18" /></template>
-        </n-button>
-        <n-button quaternary circle :title="t('main.settings')" @click="$emit('open-settings')">
-          <template #icon><Settings :size="18" /></template>
-        </n-button>
-        <!-- 音源开关：仅桥接支持系统音频时显示，图标即当前音源，点击切换 -->
-        <n-button
-          v-if="supportsSystemAudio"
-          quaternary
-          circle
-          :disabled="recording || recordBusy"
-          :title="audioSourceTitle"
-          @click="toggleAudioSource"
-        >
-          <template #icon>
-            <component :is="settings?.audioSource === 'system' ? MonitorSpeaker : Mic" :size="18" />
+        <n-tooltip v-else>
+          <template #trigger>
+            <n-button quaternary circle disabled :aria-label="t('main.clear')">
+              <template #icon><Eraser :size="18" /></template>
+            </n-button>
           </template>
-        </n-button>
+          {{ t('main.clear') }}
+        </n-tooltip>
+        <n-tooltip>
+          <template #trigger>
+            <n-button quaternary circle :aria-label="t('main.viewArchives')" @click="$emit('open-archive')">
+              <template #icon><Library :size="18" /></template>
+            </n-button>
+          </template>
+          {{ t('main.viewArchives') }}
+        </n-tooltip>
+        <n-tooltip>
+          <template #trigger>
+            <n-button quaternary circle :aria-label="t('main.settings')" @click="$emit('open-settings')">
+              <template #icon><Settings :size="18" /></template>
+            </n-button>
+          </template>
+          {{ t('main.settings') }}
+        </n-tooltip>
+        <!-- 音源开关：仅桥接支持系统音频时显示，图标即当前音源，点击切换 -->
+        <n-tooltip v-if="supportsSystemAudio">
+          <template #trigger>
+            <n-button
+              quaternary
+              circle
+              :disabled="recording || recordBusy"
+              :aria-label="audioSourceTitle"
+              @click="toggleAudioSource"
+            >
+              <template #icon>
+                <component :is="settings?.audioSource === 'system' ? MonitorSpeaker : Mic" :size="18" />
+              </template>
+            </n-button>
+          </template>
+          {{ audioSourceTitle }}
+        </n-tooltip>
         <n-button
           :type="recording ? 'error' : 'primary'"
           :disabled="preparing || recordBusy"
@@ -305,9 +329,14 @@ function openMicSettings(): void {
           :options="mobileMenuOptions"
           @select="onMobileMenuSelect"
         >
-          <n-button quaternary circle :title="t('main.menu')">
-            <template #icon><MoreHorizontal :size="20" /></template>
-          </n-button>
+          <n-tooltip>
+            <template #trigger>
+              <n-button quaternary circle :aria-label="t('main.menu')">
+                <template #icon><MoreHorizontal :size="20" /></template>
+              </n-button>
+            </template>
+            {{ t('main.menu') }}
+          </n-tooltip>
         </n-dropdown>
       </div>
     </header>
@@ -392,16 +421,21 @@ function openMicSettings(): void {
     />
 
     <!-- bottom 计入 safe-area，避开 Home 指示条 -->
-    <button
-      class="fixed left-1/2 z-20 flex h-16 w-16 -translate-x-1/2 items-center justify-center rounded-full text-white shadow-lg transition-colors disabled:opacity-40 sm:hidden"
-      :class="recording ? 'bg-red-500 active:bg-red-600' : 'bg-emerald-500 active:bg-emerald-600'"
-      :style="{ bottom: 'calc(env(safe-area-inset-bottom) + 22px)' }"
-      :disabled="preparing || recordBusy"
-      :title="recording ? t('main.stop') : t('main.start')"
-      @click="onRecordClick"
-    >
-      <LoaderCircle v-if="recordBusy" :size="26" class="animate-spin" />
-      <component v-else :is="recording ? Square : Mic" :size="26" :fill="recording ? 'currentColor' : 'none'" />
-    </button>
+    <n-tooltip>
+      <template #trigger>
+        <button
+          class="fixed left-1/2 z-20 flex h-16 w-16 -translate-x-1/2 items-center justify-center rounded-full text-white shadow-lg transition-colors disabled:opacity-40 sm:hidden"
+          :class="recording ? 'bg-red-500 active:bg-red-600' : 'bg-emerald-500 active:bg-emerald-600'"
+          :style="{ bottom: 'calc(env(safe-area-inset-bottom) + 22px)' }"
+          :disabled="preparing || recordBusy"
+          :aria-label="recording ? t('main.stop') : t('main.start')"
+          @click="onRecordClick"
+        >
+          <LoaderCircle v-if="recordBusy" :size="26" class="animate-spin" />
+          <component v-else :is="recording ? Square : Mic" :size="26" :fill="recording ? 'currentColor' : 'none'" />
+        </button>
+      </template>
+      {{ recording ? t('main.stop') : t('main.start') }}
+    </n-tooltip>
   </div>
 </template>

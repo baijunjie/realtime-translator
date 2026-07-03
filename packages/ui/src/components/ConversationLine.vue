@@ -3,6 +3,7 @@
 // dim=true 用于主页历史（弱化，让当前句更突出）。
 // translating=true 表示译文尚未到达、仍在翻译中：在译文区显示等待动画（归档详情不传，恒 false）。
 // failed=true 表示该行翻译失败：译文区显示失败标记，悬停可见 failedDetail 原始错误。
+import { NTooltip } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
 import TranslatingDots from './TranslatingDots.vue';
 const { t } = useI18n();
@@ -44,7 +45,14 @@ defineProps<{
       >
         <template v-if="translation">{{ translation }}</template>
         <TranslatingDots v-else-if="translating" class="text-blue-500/70" />
-        <span v-else :title="failedDetail">{{ t('status.transFailedLine') }}</span>
+        <!-- 失败标记：有原始错误时用 tooltip 悬停展示，无错误详情则仅显示标记 -->
+        <n-tooltip v-else-if="failedDetail">
+          <template #trigger>
+            <span>{{ t('status.transFailedLine') }}</span>
+          </template>
+          {{ failedDetail }}
+        </n-tooltip>
+        <span v-else>{{ t('status.transFailedLine') }}</span>
       </div>
     </div>
   </div>

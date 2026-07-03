@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { NButton, NTag, NPopconfirm } from 'naive-ui';
+import { NButton, NTag, NPopconfirm, NTooltip } from 'naive-ui';
 import { Download, Trash2 } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
 import { getAsrModel, M2M100_SPEC, type ModelInfo } from '@rt/core';
@@ -105,22 +105,31 @@ onMounted(refresh);
             @positive-click="remove(m)"
           >
             <template #trigger>
-              <n-button quaternary circle size="small" :disabled="deleteDisabled" :title="t('modelsScreen.delete')">
-                <template #icon><Trash2 :size="16" /></template>
-              </n-button>
+              <n-tooltip>
+                <template #trigger>
+                  <n-button quaternary circle size="small" :disabled="deleteDisabled" :aria-label="t('modelsScreen.delete')">
+                    <template #icon><Trash2 :size="16" /></template>
+                  </n-button>
+                </template>
+                {{ t('modelsScreen.delete') }}
+              </n-tooltip>
             </template>
             {{ m.inUse ? t('modelsScreen.deleteInUseWarn') : t('modelsScreen.deleteConfirm') }}
           </n-popconfirm>
-          <n-button
-            v-else-if="canDownload(m)"
-            quaternary
-            circle
-            size="small"
-            :title="t('modelsScreen.download')"
-            @click="download(m)"
-          >
-            <template #icon><Download :size="16" /></template>
-          </n-button>
+          <n-tooltip v-else-if="canDownload(m)">
+            <template #trigger>
+              <n-button
+                quaternary
+                circle
+                size="small"
+                :aria-label="t('modelsScreen.download')"
+                @click="download(m)"
+              >
+                <template #icon><Download :size="16" /></template>
+              </n-button>
+            </template>
+            {{ t('modelsScreen.download') }}
+          </n-tooltip>
         </li>
       </ul>
     </section>
@@ -154,22 +163,31 @@ onMounted(refresh);
             @positive-click="remove(m)"
           >
             <template #trigger>
-              <n-button quaternary circle size="small" :disabled="deleteDisabled" :title="t('modelsScreen.delete')">
-                <template #icon><Trash2 :size="16" /></template>
-              </n-button>
+              <n-tooltip>
+                <template #trigger>
+                  <n-button quaternary circle size="small" :disabled="deleteDisabled" :aria-label="t('modelsScreen.delete')">
+                    <template #icon><Trash2 :size="16" /></template>
+                  </n-button>
+                </template>
+                {{ t('modelsScreen.delete') }}
+              </n-tooltip>
             </template>
             {{ m.inUse ? t('modelsScreen.deleteInUseWarn') : t('modelsScreen.deleteConfirm') }}
           </n-popconfirm>
-          <n-button
-            v-else-if="canDownload(m)"
-            quaternary
-            circle
-            size="small"
-            :title="t('modelsScreen.download')"
-            @click="download(m)"
-          >
-            <template #icon><Download :size="16" /></template>
-          </n-button>
+          <n-tooltip v-else-if="canDownload(m)">
+            <template #trigger>
+              <n-button
+                quaternary
+                circle
+                size="small"
+                :aria-label="t('modelsScreen.download')"
+                @click="download(m)"
+              >
+                <template #icon><Download :size="16" /></template>
+              </n-button>
+            </template>
+            {{ t('modelsScreen.download') }}
+          </n-tooltip>
         </li>
       </ul>
     </section>

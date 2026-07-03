@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { reactive, ref, watch } from 'vue';
-import { NButton } from 'naive-ui';
+import { NButton, NTooltip } from 'naive-ui';
 import { ArrowLeft, SlidersHorizontal, Mic, Languages, HardDrive } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
 import { M2M100_SPEC } from '@rt/core';
@@ -133,9 +133,14 @@ function onDownloadCancel(): void {
     <header
       class="flex items-center gap-3 border-b border-neutral-200 px-[18px] py-3 dark:border-[#3a3b44]"
     >
-      <n-button quaternary circle :title="t('settings.back')" @click="emit('close')">
-        <template #icon><ArrowLeft :size="18" /></template>
-      </n-button>
+      <n-tooltip>
+        <template #trigger>
+          <n-button quaternary circle :aria-label="t('settings.back')" @click="emit('close')">
+            <template #icon><ArrowLeft :size="18" /></template>
+          </n-button>
+        </template>
+        {{ t('settings.back') }}
+      </n-tooltip>
       <span class="text-[15px] font-semibold">{{ t('settings.title') }}</span>
     </header>
 
