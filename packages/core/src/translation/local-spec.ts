@@ -80,31 +80,12 @@ export const M2M100_SPEC: LocalModelSpec = {
   platforms: ['macos', 'web'],
 };
 
-// mBART-50 many-to-many（基座 facebook/mbart-large-50 为 MIT）。参数量大于 M2M100，翻译质量更高、体积更大。
-// 语言码用 mBART-50 的 locale 风格串（en_XX / ja_XX / ko_KR / zh_CN）；简繁字形处理与 M2M100 同构：
-// 中文母语归一化为简体，yue 与 zh 共用模型码 zh_CN 但作不同语言处理（lang 回退到键 'yue'）。
-export const MBART50_SPEC: LocalModelSpec = {
-  id: 'mbart50',
-  nameKey: 'models.mbart50',
-  modelId: 'Xenova/mbart-large-50-many-to-many-mmt',
-  dtype: 'q8',
-  weightFiles: ['encoder_model', 'decoder_model'],
-  // q8 encoder(409.7MB) + decoder_merged(462.9MB) + tokenizer.json(17.1MB) + 根目录 config 等小文件之和。
-  approxDownloadBytes: 889_657_579,
-  fallbackLang: 'en_XX',
-  langs: {
-    zh: { code: 'zh_CN', lang: 'zh', toScript: normalizeZh },
-    en: { code: 'en_XX' },
-    ja: { code: 'ja_XX' },
-    ko: { code: 'ko_KR' },
-    // yue 无独立 mBART-50 语言码，落 zh_CN；与 zh 作不同语言处理（lang 回退到键 'yue'）。
-    yue: { code: 'zh_CN' },
-  },
-  platforms: ['macos', 'web'],
-};
-
-/** 可选用的本地翻译模型注册表（默认项在首）。 */
-export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = [M2M100_SPEC, MBART50_SPEC];
+/**
+ * 可选用的本地翻译模型注册表（默认项在首）。
+ * 入册硬门槛：非英语直连方向（本项目核心场景是 ja↔zh）实测可用。英语中心的
+ * many-to-many 模型（如 mBART-50）ja→zh 接近零样本、会输出英语或幻觉，不满足门槛。
+ */
+export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = [M2M100_SPEC];
 
 /** 默认本地翻译模型 id（轻量、全本地平台可用）。 */
 export const DEFAULT_TRANSLATION_MODEL_ID: LocalEngine = 'm2m100';
