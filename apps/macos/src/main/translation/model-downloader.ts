@@ -32,11 +32,18 @@ export async function downloadTranslationModel(
   let base = 0; // 已完成文件的累计实收字节
   for (const f of toDownload) {
     let last = 0;
-    await downloadFile(f.url, localPath(f), (loaded) => {
-      last = loaded;
-      // 实收字节可能略超近似分母（q8 实际略大于估值）：封顶到 total，避免进度条越界。
-      onProgress({ loaded: Math.min(base + loaded, total), total });
-    });
+    // 主源失效时 downloadFile 内部会以 fallbackUrl 从头重下：loaded 归零后 last 随之被覆盖，
+    // 聚合进度里该文件的份额回退再爬升，收尾 base += last 仍是最终实收字节，累计正确。
+    await downloadFile(
+      f.url,
+      localPath(f),
+      (loaded) => {
+        last = loaded;
+        // 实收字节可能略超近似分母（q8 实际略大于估值）：封顶到 total，避免进度条越界。
+        onProgress({ loaded: Math.min(base + loaded, total), total });
+      },
+      f.fallbackUrl
+    );
     base += last;
   }
   // 末尾对齐 100%：各文件实收合计与近似分母有出入，收尾时把进度贴到满格。

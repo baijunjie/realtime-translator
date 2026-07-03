@@ -11,7 +11,13 @@
 // 注意：模型文件本身**绝不**进仓库，只在运行时按需下载 + 缓存。WASM 侧（worker）拿到这里
 // 解出的 ArrayBuffer 后，再 Module.FS.writeFile 进 MEMFS 给 sherpa 用。
 
-import { SILERO_VAD, getAsrModel, requiredAsrFiles, type AsrModelFile } from '@rt/core';
+import {
+  SILERO_VAD,
+  browserDownloadUrls,
+  getAsrModel,
+  requiredAsrFiles,
+  type AsrModelFile,
+} from '@rt/core';
 
 /** Cache Storage 里存放 ASR 模型的缓存名（强制更新清理应用缓存时须保留）。 */
 export const ASR_MODEL_CACHE_NAME = 'realtime-translator-asr-models-v1';
@@ -26,15 +32,22 @@ function modelFiles(modelId: string): AsrModelFile[] {
 }
 
 // 浏览器跨源：GitHub Releases 不发 CORS 头（且 302 跳 S3），浏览器 fetch 会被拦。
-// Silero VAD 很小（~0.6MB），改为随应用同源托管在 public/models/（同源无 CORS、可即时离线）；
-// 各模型权重仍从 HuggingFace 拉（HF 带 Access-Control-Allow-Origin，浏览器可跨源取）。
+// Silero VAD 很小（~0.6MB）且其主源与上游均为 GitHub release（浏览器都取不到），故随应用
+// 同源托管在 public/models/（同源无 CORS、可即时离线），此覆盖优先级最高。
+// 各模型权重的自托管主源同样是 GitHub（web 取不到），由 browserDownloadUrls 跳过、改走上游 fallback。
 const SAME_ORIGIN_BUNDLED: Record<string, string> = {
   'silero_vad.onnx': `${import.meta.env.BASE_URL}models/silero_vad.onnx`,
 };
 
-/** 解析浏览器实际可 fetch 的地址：同源托管的优先，否则用 @rt/core 的远程 URL。 */
-function resolveUrl(file: AsrModelFile): string {
-  return SAME_ORIGIN_BUNDLED[file.filename] ?? file.url;
+/**
+ * 浏览器可依次尝试的 fetch 源（按优先级）：同源托管覆盖最高；其余按 browserDownloadUrls
+ * 决策（GitHub 主源无 CORS 必跳过、改走上游 fallback；主源非 GitHub 则先主源后 fallback）。
+ * 空数组表示浏览器端无可用源（downloadIntoCache 会报明确错误）。
+ */
+function resolveUrls(file: AsrModelFile): string[] {
+  const bundled = SAME_ORIGIN_BUNDLED[file.filename];
+  const remote = browserDownloadUrls(file.url, file.fallbackUrl);
+  return bundled ? [bundled, ...remote] : remote;
 }
 
 /** 聚合下载进度（与 @rt/core SetupProgress 同形）。 */
@@ -158,16 +171,44 @@ export function modelFileList(modelId: string): string[] {
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 流式下载单个文件并写入 Cache Storage：res.body.tee() 双分支，一支直接作为
+ * 下载单个文件并写入 Cache Storage：依次尝试 resolveUrls 的候选源（主源失败或停滞时回退到
+ * 下一候选，全部失败才抛错）。回退重试会以新连接从头下载，onFileProgress 从 0 重新计数
+ * （聚合进度里该文件的份额回退再爬升，是同文件重下的正确表现）。
+ */
+async function downloadIntoCache(
+  cache: Cache,
+  key: string,
+  file: AsrModelFile,
+  onFileProgress: (loaded: number) => void,
+): Promise<void> {
+  const urls = resolveUrls(file);
+  if (urls.length === 0) {
+    throw new Error(`浏览器端无可用下载源: ${file.filename}`);
+  }
+  let lastErr: unknown;
+  for (const url of urls) {
+    try {
+      await fetchIntoCache(cache, key, url, file, onFileProgress);
+      return;
+    } catch (err) {
+      lastErr = err; // 还有候选源则继续回退重试；否则抛出末次错误
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * 从单一 URL 流式下载并写入 Cache Storage：res.body.tee() 双分支，一支直接作为
  * Response 体交给 cache.put 边下边落缓存，另一支只统计字节数回吐单文件进度——
  * 全程不在 JS 堆里聚合完整文件，内存峰值与文件大小无关（网络是瓶颈，两支都按
  * 网络速率消费，tee 的内部缓冲不会堆积）。
  * cache.put 的体流中途出错时按规范不会写入条目，失败不会留下半截缓存。
  * 字节流停滞（TCP 静默断开、无 RST）时由无进展看门狗 abort，交给失败→重试 UI 接管。
  */
-async function downloadIntoCache(
+async function fetchIntoCache(
   cache: Cache,
   key: string,
+  url: string,
   file: AsrModelFile,
   onFileProgress: (loaded: number) => void,
 ): Promise<void> {
@@ -184,7 +225,7 @@ async function downloadIntoCache(
 
   armWatchdog(); // 连接/响应头阶段也受同一 signal 约束
   try {
-    const res = await fetch(resolveUrl(file), {
+    const res = await fetch(url, {
       mode: 'cors',
       redirect: 'follow',
       signal: controller.signal,

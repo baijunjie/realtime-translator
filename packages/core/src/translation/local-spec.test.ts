@@ -63,7 +63,8 @@ describe('本地翻译模型注册表', () => {
         expect(f.filename.length).toBeGreaterThan(0);
         // dir 为缓存布局子目录：'' 或形如 'onnx'（不含前后斜杠）
         expect(f.dir).not.toMatch(/^\/|\/$/);
-        // url 末段即文件名（下载源直链，落地文件名与之一致）
+        // 主源为自托管 GitHub Release 资产，扁平命名以文件名结尾（落地文件名与之一致）。
+        expect(f.url).toContain('github.com/baijunjie/realtime-translator/releases/download/models-v1/');
         expect(f.url.endsWith(f.filename)).toBe(true);
       }
       // spec.files 里的 .onnx 文件名整体覆盖 weightFiles 判据（离线加载所需权重齐全）。
@@ -84,9 +85,25 @@ describe('本地翻译模型注册表', () => {
         'onnx/decoder_model_merged_quantized.onnx',
       ]),
     );
-    // 下载源均指向 Xenova/m2m100_418M 仓的 main 分支 resolve 直链。
+    // 双源：主源为自托管 GitHub Release 资产（扁平命名带 m2m100_418M- 前缀），
+    // fallback 为上游 Xenova/m2m100_418M 仓 main 分支 resolve 直链（含缓存布局子目录）。
     for (const f of M2M100_SPEC.files) {
-      expect(f.url).toContain('huggingface.co/Xenova/m2m100_418M/resolve/main/');
+      expect(f.url).toBe(
+        `https://github.com/baijunjie/realtime-translator/releases/download/models-v1/m2m100_418M-${f.filename}`,
+      );
+      const rel = f.dir ? `${f.dir}/${f.filename}` : f.filename;
+      expect(f.fallbackUrl).toBe(`https://huggingface.co/Xenova/m2m100_418M/resolve/main/${rel}`);
+    }
+  });
+
+  it('M2M100-1.2B 为自托管唯一源：主源带 m2m100_1.2B- 前缀，无上游 fallback', () => {
+    const spec = LOCAL_TRANSLATION_MODELS.find((m) => m.id === 'm2m100-1.2b');
+    expect(spec).toBeDefined();
+    for (const f of spec!.files) {
+      expect(f.url).toBe(
+        `https://github.com/baijunjie/realtime-translator/releases/download/models-v1/m2m100_1.2B-${f.filename}`,
+      );
+      expect(f.fallbackUrl).toBeUndefined();
     }
   });
 

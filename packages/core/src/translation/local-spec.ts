@@ -2,6 +2,7 @@
 // 以及中文简体归一化（normalizeZh，基于 chinese-conv）。
 // 具体跑模型的 LocalTranslator 实现（依赖 onnxruntime-node）留在各端。
 import { sify } from 'chinese-conv';
+import { ghModelAsset } from '../model-assets';
 import type { LocalEngine, Platform } from '../types';
 
 /** 中文简体归一化：模型输出偶带繁体字形，统一转简体（成本极低，值得保留）。 */
@@ -31,8 +32,13 @@ export interface LangEntry {
  * 以 allowRemoteModels=false 离线加载）。与 ASR 的 AsrModelFile 同理——注册表声明 URL，各端自行下载。
  */
 export interface LocalModelFile {
-  /** 远程下载地址（当前为 HF resolve 直链；后续大模型可换 GitHub Releases 直链，与缓存键解耦）。 */
+  /** 主源下载地址（自托管 GitHub Release 扁平直链，与缓存键解耦）。 */
   url: string;
+  /**
+   * 上游 fallback 下载地址：主源（url）失效或停滞时回退。缺省表示无上游备源。
+   * web 端因 GitHub Release 无 CORS 头而只能走此上游源（见 model-assets.browserDownloadUrls）。
+   */
+  fallbackUrl?: string;
   /** 落地文件名（如 encoder_model_quantized.onnx）。 */
   filename: string;
   /**
@@ -81,10 +87,19 @@ export function hasAllWeightFiles(spec: LocalModelSpec, cached: string[]): boole
 
 // M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
 const M2M100_REPO = 'Xenova/m2m100_418M';
-/** 构造 M2M100 的一个待下载文件：URL 为该仓 main 分支的 resolve 直链，dir 为缓存布局子目录。 */
+/**
+ * 构造 M2M100-418M 的一个待下载文件：主源 url 为自托管 GitHub Release 资产（扁平命名
+ * `m2m100_418M-<原文件名>`，与 1.2B 前缀风格一致），fallbackUrl 为上游 Xenova HF resolve 直链。
+ * dir 仅为缓存布局子目录（'' 或 'onnx'），与下载源 URL 解耦。
+ */
 function m2m100File(dir: string, filename: string): LocalModelFile {
   const rel = dir ? `${dir}/${filename}` : filename;
-  return { url: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`, filename, dir };
+  return {
+    url: ghModelAsset(`m2m100_418M-${filename}`),
+    fallbackUrl: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`,
+    filename,
+    dir,
+  };
 }
 
 // M2M100 系（418M / 1.2B）共用同一分词器与语言码映射。
@@ -123,12 +138,10 @@ export const M2M100_SPEC: LocalModelSpec = {
 };
 
 // M2M100-1.2B（MIT，质量档）。官方无 ONNX 发布，权重经 optimum 导出 + 合并 decoder + q8 量化后
-// 自托管于本仓库 GitHub Release（models-v1，资产名带 m2m100_1.2B- 前缀的扁平文件）；
-// modelId 仅作 Transformers.js 缓存布局键，不对应 HuggingFace 仓库。
-const M2M100_1_2B_ASSET_BASE =
-  'https://github.com/baijunjie/realtime-translator/releases/download/models-v1';
+// 自托管于本仓库 GitHub Release（models-v1，资产名带 m2m100_1.2B- 前缀的扁平文件）；无上游镜像，
+// 故不设 fallbackUrl（唯一源）。modelId 仅作 Transformers.js 缓存布局键，不对应 HuggingFace 仓库。
 function m2m1002bFile(dir: string, filename: string): LocalModelFile {
-  return { url: `${M2M100_1_2B_ASSET_BASE}/m2m100_1.2B-${filename}`, filename, dir };
+  return { url: ghModelAsset(`m2m100_1.2B-${filename}`), filename, dir };
 }
 
 export const M2M100_1_2B_SPEC: LocalModelSpec = {

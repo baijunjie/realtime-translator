@@ -11,7 +11,12 @@
 //    默认 remoteHost='https://huggingface.co/'、revision='main'。存进这个键，离线加载才能命中。
 //  对 m2m100 两者恰好同为 HF URL；对未来 GitHub 源，缓存键仍按 modelId 构造成 HF 目录式布局。
 
-import { hasAllWeightFiles, type LocalModelSpec, type LocalModelFile } from '@rt/core';
+import {
+  browserDownloadUrls,
+  hasAllWeightFiles,
+  type LocalModelSpec,
+  type LocalModelFile,
+} from '@rt/core';
 
 // Transformers.js（本项目 v4）浏览器端默认用 Cache API 缓存模型，缓存名取 env.cacheKey，默认即此值
 // （本项目未改）。forceUpdateApp 清应用外壳缓存时须保留此缓存。
@@ -101,14 +106,43 @@ export async function deleteTranslationModelFromCache(spec: LocalModelSpec): Pro
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 流式下载单个文件（源 URL = file.url）并以 key 写入 Cache Storage：res.body.tee() 双分支，一支
- * 直接作为 Response 体交给 cache.put 边下边落缓存，另一支只统计字节数回吐单文件进度——全程不在
- * JS 堆里聚合完整文件，内存峰值与文件大小无关。cache.put 的体流中途出错时按规范不写入条目，
- * 失败不留半截缓存。字节流停滞时由无进展看门狗 abort，交给失败→重试 UI 接管。
+ * 下载单个文件并以 key 写入 Cache Storage：依次尝试 browserDownloadUrls 的候选源（GitHub 主源
+ * 无 CORS 必跳过、改走上游 fallback；主源非 GitHub 则先主源后 fallback；主源失败或停滞时回退到
+ * 下一候选，全部失败才抛错）。回退重试以新连接从头下载，onFileProgress 从 0 重新计数（聚合进度里
+ * 该文件的份额回退再爬升，是同文件重下的正确表现）。
  */
 async function downloadIntoCache(
   cache: Cache,
   key: string,
+  file: LocalModelFile,
+  onFileProgress: (received: number) => void,
+): Promise<void> {
+  const urls = browserDownloadUrls(file.url, file.fallbackUrl);
+  if (urls.length === 0) {
+    throw new Error(`浏览器端无可用下载源: ${file.filename}`);
+  }
+  let lastErr: unknown;
+  for (const url of urls) {
+    try {
+      await fetchIntoCache(cache, key, url, file, onFileProgress);
+      return;
+    } catch (err) {
+      lastErr = err; // 还有候选源则继续回退重试；否则抛出末次错误
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * 从单一 URL 流式下载并以 key 写入 Cache Storage：res.body.tee() 双分支，一支直接作为 Response
+ * 体交给 cache.put 边下边落缓存，另一支只统计字节数回吐单文件进度——全程不在 JS 堆里聚合完整文件，
+ * 内存峰值与文件大小无关。cache.put 的体流中途出错时按规范不写入条目，失败不留半截缓存。
+ * 字节流停滞时由无进展看门狗 abort，交给失败→重试 UI 接管。
+ */
+async function fetchIntoCache(
+  cache: Cache,
+  key: string,
+  url: string,
   file: LocalModelFile,
   onFileProgress: (received: number) => void,
 ): Promise<void> {
@@ -125,7 +159,7 @@ async function downloadIntoCache(
 
   armWatchdog(); // 连接/响应头阶段也受同一 signal 约束
   try {
-    const res = await fetch(file.url, { mode: 'cors', redirect: 'follow', signal: controller.signal });
+    const res = await fetch(url, { mode: 'cors', redirect: 'follow', signal: controller.signal });
     if (!res.ok) {
       throw new Error(`下载失败 ${file.filename}: HTTP ${res.status}`);
     }

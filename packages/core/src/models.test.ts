@@ -59,6 +59,29 @@ describe('asrModelsFor', () => {
   });
 });
 
+describe('ASR 双源 URL（自托管主源 + 上游 fallback）', () => {
+  const GH_BASE = 'https://github.com/baijunjie/realtime-translator/releases/download/models-v1/';
+
+  it('公共依赖 VAD：主源为自托管无前缀资产，fallback 为上游 k2-fsa release', () => {
+    expect(SILERO_VAD.url).toBe(`${GH_BASE}silero_vad.onnx`);
+    expect(SILERO_VAD.fallbackUrl).toBe(
+      'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx',
+    );
+  });
+
+  it('各模型文件：主源为自托管资产（modelId- 前缀 + 原文件名），fallback 为上游 HF csukuangfj 直链', () => {
+    for (const m of ASR_MODELS) {
+      for (const f of m.files) {
+        // 主源：github release，扁平命名 `<modelId>-<原文件名>`，以原文件名结尾。
+        expect(f.url).toBe(`${GH_BASE}${m.id}-${f.filename}`);
+        // fallback：上游 HF csukuangfj resolve 直链，以原文件名结尾。
+        expect(f.fallbackUrl).toMatch(/^https:\/\/huggingface\.co\/csukuangfj\/.+\/resolve\/main\//);
+        expect(f.fallbackUrl?.endsWith(f.filename)).toBe(true);
+      }
+    }
+  });
+});
+
 describe('requiredAsrFiles', () => {
   it('含公共依赖 VAD + 该模型全部文件（POSIX 相对路径）', () => {
     const files = requiredAsrFiles('sense-voice');

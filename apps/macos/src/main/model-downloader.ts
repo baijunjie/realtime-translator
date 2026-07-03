@@ -17,10 +17,30 @@ export function asrModelsReady(modelsDir: string, modelId: string): boolean {
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 流式下载单个文件到 dest（先写 .part 再原子 rename），带无进展看门狗。
- * ASR 与翻译模型的自研下载链路共用此函数（翻译模型见 ./translation/model-downloader）。
+ * 下载单个文件到 dest（先试主源 url，失败或停滞且有 fallbackUrl 时改用上游 fallback 重试一次；
+ * 两者都败才抛错）。ASR 与翻译模型的自研下载链路共用此函数（翻译模型见 ./translation/model-downloader）。
+ *
+ * 进度语义：回退重试时会以新连接重新下载同一文件，onBytes 的 loaded 从 0 重新计数——聚合进度里
+ * 该文件的份额相应回退再爬升，是同文件重下的正确表现（调用方按每次回调覆盖式记录 last，故收尾累计正确）。
  */
 export async function downloadFile(
+  url: string,
+  dest: string,
+  onBytes?: (loaded: number, total: number) => void,
+  fallbackUrl?: string
+): Promise<void> {
+  try {
+    await downloadFromUrl(url, dest, onBytes);
+  } catch (err) {
+    if (!fallbackUrl) throw err;
+    // 主源（自托管）失效或停滞：换上游 fallback 重试一次。.part 临时文件已在上次失败时清理，
+    // 本次以全新连接从头下载。
+    await downloadFromUrl(fallbackUrl, dest, onBytes);
+  }
+}
+
+/** 从单一 URL 流式下载到 dest（先写 .part 再原子 rename），带无进展看门狗。 */
+async function downloadFromUrl(
   url: string,
   dest: string,
   onBytes?: (loaded: number, total: number) => void
@@ -103,10 +123,17 @@ export async function downloadAsrModels(
   let base = 0; // 已完成文件的累计实收字节
   for (const f of toDownload) {
     let last = 0;
-    await downloadFile(f.url, localPath(f), (loaded) => {
-      last = loaded;
-      onProgress({ loaded: base + loaded, total });
-    });
+    // 主源失效时 downloadFile 内部会以 fallbackUrl 从头重下：loaded 归零后 last 随之被覆盖，
+    // 聚合进度里该文件的份额回退再爬升，收尾 base += last 仍是最终实收字节，累计正确。
+    await downloadFile(
+      f.url,
+      localPath(f),
+      (loaded) => {
+        last = loaded;
+        onProgress({ loaded: base + loaded, total });
+      },
+      f.fallbackUrl
+    );
     base += last;
   }
 

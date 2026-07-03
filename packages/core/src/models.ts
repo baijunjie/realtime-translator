@@ -7,6 +7,7 @@
 // requiredAsrFiles），不要再各端硬编码 URL/文件名/目录，避免与 macOS 漂移。
 //
 // 翻译模型（Xenova/m2m100_418M）的规格见 ./translation/local-spec.ts。
+import { ghModelAsset } from './model-assets';
 import type { AsrLang, Platform } from './types';
 
 /** HuggingFace 上 csukuangfj 账号某仓的 resolve 基址（文件按 `${base}/<file>` 取）。 */
@@ -16,8 +17,13 @@ function hfBase(repo: string): string {
 
 /** 单个需下载的 ASR 模型文件的平台无关描述。 */
 export interface AsrModelFile {
-  /** 远程下载地址（自动跟随 GitHub/HF 重定向）。 */
+  /** 主源下载地址（自托管 GitHub Release，Node 下载自动跟随重定向）。 */
   url: string;
+  /**
+   * 上游 fallback 下载地址：主源（url）失效或停滞时回退。缺省表示无上游备源。
+   * web 端因 GitHub Release 无 CORS 头而只能走此上游源（见 model-assets.browserDownloadUrls）。
+   */
+  fallbackUrl?: string;
   /** 落地文件名。 */
   filename: string;
   /**
@@ -35,11 +41,13 @@ export interface AsrModelFile {
 }
 
 /**
- * Silero VAD：所有 ASR 模型共用的语音端点检测依赖，GitHub release 直链。
- * 不进模型选择列表，随任一模型一并下载（见 requiredAsrFiles）。
+ * Silero VAD：所有 ASR 模型共用的语音端点检测依赖。主源为自托管 GitHub Release（无前缀），
+ * fallback 为上游 k2-fsa release 直链。不进模型选择列表，随任一模型一并下载（见 requiredAsrFiles）。
  */
 export const SILERO_VAD: AsrModelFile = {
-  url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx',
+  url: ghModelAsset('silero_vad.onnx'),
+  fallbackUrl:
+    'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx',
   filename: 'silero_vad.onnx',
   dir: '',
   approxBytes: 643_854,
@@ -73,17 +81,27 @@ const REAZONSPEECH_JA_DIR = 'sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01';
 const PARAKEET_EN_DIR = 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8';
 
 /**
- * 构造一份模型文件描述。多数模型的 HF 仓名与本地子目录同名（dir 默认取 repo）；
- * 个别模型的权重个体文件来自另一命名的源仓（如 reazonspeech），此时显式传 dir。
+ * 构造一份 ASR 模型文件描述：主源 url 为自托管 GitHub Release 资产（扁平命名
+ * `<modelId>-<原文件名>`），fallbackUrl 为上游 HF csukuangfj 直链（主源失效时回退）。
+ * 多数模型的 HF 仓名与本地子目录同名（dir 默认取 repo）；个别模型的权重个体文件来自
+ * 另一命名的源仓（如 reazonspeech），此时显式传 dir。
  */
-function hfFile(
+function asrFile(
+  modelId: string,
   repo: string,
   filename: string,
   approxBytes: number,
   role: NonNullable<AsrModelFile['role']>,
   dir: string = repo,
 ): AsrModelFile {
-  return { url: `${hfBase(repo)}/${filename}`, filename, dir, approxBytes, role };
+  return {
+    url: ghModelAsset(`${modelId}-${filename}`),
+    fallbackUrl: `${hfBase(repo)}/${filename}`,
+    filename,
+    dir,
+    approxBytes,
+    role,
+  };
 }
 
 /** 可选用的 ASR 模型注册表。 */
@@ -95,8 +113,8 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     engine: 'senseVoice',
     dir: SENSE_VOICE_DIR,
     files: [
-      hfFile(SENSE_VOICE_DIR, 'model.int8.onnx', 239_233_841, 'model'),
-      hfFile(SENSE_VOICE_DIR, 'tokens.txt', 315_894, 'tokens'),
+      asrFile('sense-voice', SENSE_VOICE_DIR, 'model.int8.onnx', 239_233_841, 'model'),
+      asrFile('sense-voice', SENSE_VOICE_DIR, 'tokens.txt', 315_894, 'tokens'),
     ],
     approxBytes: 239_549_735,
     platforms: ['macos', 'web', 'ios'],
@@ -108,8 +126,8 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     engine: 'paraformer',
     dir: PARAFORMER_ZH_DIR,
     files: [
-      hfFile(PARAFORMER_ZH_DIR, 'model.int8.onnx', 227_330_205, 'model'),
-      hfFile(PARAFORMER_ZH_DIR, 'tokens.txt', 75_354, 'tokens'),
+      asrFile('paraformer-zh', PARAFORMER_ZH_DIR, 'model.int8.onnx', 227_330_205, 'model'),
+      asrFile('paraformer-zh', PARAFORMER_ZH_DIR, 'tokens.txt', 75_354, 'tokens'),
     ],
     approxBytes: 227_405_559,
     platforms: ['macos', 'web'],
@@ -120,14 +138,14 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     languages: ['ja'],
     engine: 'transducer',
     dir: REAZONSPEECH_JA_DIR,
-    // 权重个体文件取自源仓 reazonspeech-k2-v2：预置包 sherpa-onnx-zipformer-ja-
+    // fallback 权重个体文件取自上游源仓 reazonspeech-k2-v2：预置包 sherpa-onnx-zipformer-ja-
     // reazonspeech-2024-08-01 仅以 GitHub release tar 包整体分发，无逐文件 HF 直链。
     // 落地目录沿用预置包命名，encoder/joiner 用 int8、decoder 用 fp32（该包约定）。
     files: [
-      hfFile('reazonspeech-k2-v2', 'encoder-epoch-99-avg-1.int8.onnx', 154_670_139, 'encoder', REAZONSPEECH_JA_DIR),
-      hfFile('reazonspeech-k2-v2', 'decoder-epoch-99-avg-1.onnx', 11_767_836, 'decoder', REAZONSPEECH_JA_DIR),
-      hfFile('reazonspeech-k2-v2', 'joiner-epoch-99-avg-1.int8.onnx', 2_696_970, 'joiner', REAZONSPEECH_JA_DIR),
-      hfFile('reazonspeech-k2-v2', 'tokens.txt', 45_754, 'tokens', REAZONSPEECH_JA_DIR),
+      asrFile('zipformer-ja-reazonspeech', 'reazonspeech-k2-v2', 'encoder-epoch-99-avg-1.int8.onnx', 154_670_139, 'encoder', REAZONSPEECH_JA_DIR),
+      asrFile('zipformer-ja-reazonspeech', 'reazonspeech-k2-v2', 'decoder-epoch-99-avg-1.onnx', 11_767_836, 'decoder', REAZONSPEECH_JA_DIR),
+      asrFile('zipformer-ja-reazonspeech', 'reazonspeech-k2-v2', 'joiner-epoch-99-avg-1.int8.onnx', 2_696_970, 'joiner', REAZONSPEECH_JA_DIR),
+      asrFile('zipformer-ja-reazonspeech', 'reazonspeech-k2-v2', 'tokens.txt', 45_754, 'tokens', REAZONSPEECH_JA_DIR),
     ],
     approxBytes: 169_180_699,
     platforms: ['macos', 'web'],
@@ -140,10 +158,10 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     modelType: 'nemo_transducer',
     dir: PARAKEET_EN_DIR,
     files: [
-      hfFile(PARAKEET_EN_DIR, 'encoder.int8.onnx', 652_184_296, 'encoder'),
-      hfFile(PARAKEET_EN_DIR, 'decoder.int8.onnx', 7_257_753, 'decoder'),
-      hfFile(PARAKEET_EN_DIR, 'joiner.int8.onnx', 1_739_080, 'joiner'),
-      hfFile(PARAKEET_EN_DIR, 'tokens.txt', 9_384, 'tokens'),
+      asrFile('parakeet-tdt-0.6b-v2-en', PARAKEET_EN_DIR, 'encoder.int8.onnx', 652_184_296, 'encoder'),
+      asrFile('parakeet-tdt-0.6b-v2-en', PARAKEET_EN_DIR, 'decoder.int8.onnx', 7_257_753, 'decoder'),
+      asrFile('parakeet-tdt-0.6b-v2-en', PARAKEET_EN_DIR, 'joiner.int8.onnx', 1_739_080, 'joiner'),
+      asrFile('parakeet-tdt-0.6b-v2-en', PARAKEET_EN_DIR, 'tokens.txt', 9_384, 'tokens'),
     ],
     approxBytes: 661_190_513,
     platforms: ['macos', 'web'],
