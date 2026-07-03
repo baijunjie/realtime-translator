@@ -15,15 +15,17 @@ Try it now in your browser: **https://baijunjie.github.io/realtime-translator/**
   - **Local** (default): on-device translation — downloaded once, then works offline; text never leaves your machine (macOS / web run M2M100; iOS uses Apple's Translation framework)
   - **Cloud** (optional): any OpenAI-compatible endpoint (set Base URL / API Key / Model in Settings; the key is stored only on your device) — enabling it means text is sent to a third party
 - Archive conversations — save a session and reopen it later
-- Settings: native language, transcript font size, translation engine
+- Settings: native language, transcript font size, theme, translation method (the build version is shown at the bottom)
+- Models preload when the app opens — hitting Start begins recording instantly
+- Guided model downloads: dedicated download pages with per-file progress, stall detection, and a cellular-data confirmation where the platform can detect it (iOS, some browsers)
 - Runs in real time on CPU (RTF ≈ 0.03 on Apple Silicon), no GPU required
 
 ## Usage
 
 1. **First launch** — choose your language on the onboarding screen.
 2. Click **Start Recording** — captions appear live as you speak.
-3. Toggle **Translate** to show a translation into your language under each line.
-4. Open **Settings** (⚙) to change language, font size, or translation engine (and cloud credentials).
+3. Pick a **translation method** in Settings (local model / cloud / off) — a translation into your language appears under each line. Enabling the local model opens a download page first (~630 MB, per-file progress).
+4. Open **Settings** (⚙) to change language, font size, theme, or translation method (and cloud credentials).
 
 Before requesting the microphone, the app first explains what it's used for; the OS then shows its own permission prompt.
 
@@ -50,7 +52,7 @@ pnpm --filter @rt/web dev   # run the browser PWA dev server (→ @rt/web)
 
 For iOS, see `apps/ios/native-plugin/INTEGRATION.md` (the native plugin must be wired into a Capacitor iOS host; it needs the Xcode toolchain and a real device for the Translation framework).
 
-On macOS/web, the app downloads the ASR models itself on first launch (a setup screen); local translation downloads on first use (web) / first use (macOS).
+On macOS/web, the app downloads the ASR models itself on first launch (a setup screen); the local translation model downloads via a dedicated page when you enable local translation in Settings.
 
 Other scripts: `pnpm build`, `pnpm type-check`. Per-package: `pnpm --filter @rt/macos <script>` (e.g. `clean`, `test-translate`).
 
@@ -91,9 +93,9 @@ The same ASR models (Silero VAD + SenseVoice int8) run on every platform; only t
 
 | Model | Purpose | Size | How |
 |---|---|---|---|
-| Silero VAD | voice activity detection | 629KB | auto-downloaded on first launch |
+| Silero VAD | voice activity detection | ~0.6MB (web, bundled) / ~2.2MB (macOS, downloaded) | bundled same-origin on web; auto-downloaded on macOS |
 | SenseVoice (int8) | multilingual ASR | ~230MB | auto-downloaded on first launch |
-| M2M100-418M (int8) | multilingual translation | ~630MB | auto-downloaded on first use of translation (macOS / web) |
+| M2M100-418M (int8) | multilingual translation | ~630MB | downloaded via a dedicated page when local translation is enabled (macOS / web) |
 
 iOS does **not** download M2M100 — it uses Apple's on-device translation instead. Traditional Chinese output is produced by script conversion (M2M100 / Apple don't distinguish scripts).
 
