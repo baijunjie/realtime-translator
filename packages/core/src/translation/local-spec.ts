@@ -87,6 +87,18 @@ function m2m100File(dir: string, filename: string): LocalModelFile {
   return { url: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`, filename, dir };
 }
 
+// M2M100 系（418M / 1.2B）共用同一分词器与语言码映射。
+const M2M100_LANGS: Record<string, LangEntry> = {
+  // 中文母语：产出/原文一律归一化为简体（模型输出偶带繁体字形）。
+  zh: { code: 'zh', lang: 'zh', toScript: normalizeZh },
+  en: { code: 'en' },
+  ja: { code: 'ja' },
+  ko: { code: 'ko' },
+  // yue（粤语）虽被 M2M100 归到 'zh' 码，但与中文是不同语言（lang 回退到键 'yue'）：
+  // 云端可真正翻译粤→中；本地模型做不到时由翻译器内部回退到字形转换。
+  yue: { code: 'zh' },
+};
+
 export const M2M100_SPEC: LocalModelSpec = {
   id: 'm2m100',
   nameKey: 'models.m2m100',
@@ -106,17 +118,38 @@ export const M2M100_SPEC: LocalModelSpec = {
   ],
   approxDownloadBytes: 640_000_000, // 上列文件合计约 640MB（q8 encoder ~288MB + decoder ~344MB + tokenizer 等）
   fallbackLang: 'en',
-  langs: {
-    // 中文母语：产出/原文一律归一化为简体（模型输出偶带繁体字形）。
-    zh: { code: 'zh', lang: 'zh', toScript: normalizeZh },
-    en: { code: 'en' },
-    ja: { code: 'ja' },
-    ko: { code: 'ko' },
-    // yue（粤语）虽被 M2M100 归到 'zh' 码，但与中文是不同语言（lang 回退到键 'yue'）：
-    // 云端可真正翻译粤→中；本地模型做不到时由翻译器内部回退到字形转换。
-    yue: { code: 'zh' },
-  },
+  langs: M2M100_LANGS,
   platforms: ['macos', 'web'],
+};
+
+// M2M100-1.2B（MIT，质量档）。官方无 ONNX 发布，权重经 optimum 导出 + 合并 decoder + q8 量化后
+// 自托管于本仓库 GitHub Release（models-v1，资产名带 m2m100_1.2B- 前缀的扁平文件）；
+// modelId 仅作 Transformers.js 缓存布局键，不对应 HuggingFace 仓库。
+const M2M100_1_2B_ASSET_BASE =
+  'https://github.com/baijunjie/realtime-translator/releases/download/models-v1';
+function m2m1002bFile(dir: string, filename: string): LocalModelFile {
+  return { url: `${M2M100_1_2B_ASSET_BASE}/m2m100_1.2B-${filename}`, filename, dir };
+}
+
+export const M2M100_1_2B_SPEC: LocalModelSpec = {
+  id: 'm2m100-1.2b',
+  nameKey: 'models.m2m100_1_2b',
+  modelId: 'realtime-translator/m2m100_1.2B',
+  dtype: 'q8',
+  weightFiles: ['encoder_model', 'decoder_model'],
+  files: [
+    m2m1002bFile('', 'config.json'),
+    m2m1002bFile('', 'generation_config.json'),
+    m2m1002bFile('', 'tokenizer_config.json'),
+    m2m1002bFile('', 'tokenizer.json'),
+    m2m1002bFile('onnx', 'encoder_model_quantized.onnx'),
+    m2m1002bFile('onnx', 'decoder_model_merged_quantized.onnx'),
+  ],
+  approxDownloadBytes: 1_531_751_193, // 上列文件精确合计（q8 encoder 642MB + decoder 881MB + tokenizer 等）
+  fallbackLang: 'en',
+  langs: M2M100_LANGS,
+  // 体积超出浏览器 WASM 内存的稳妥范围，web 暂不放开；iOS 走系统翻译不消费本地权重。
+  platforms: ['macos'],
 };
 
 /**
@@ -124,7 +157,7 @@ export const M2M100_SPEC: LocalModelSpec = {
  * 入册硬门槛：非英语直连方向（本项目核心场景是 ja↔zh）实测可用。英语中心的
  * many-to-many 模型（如 mBART-50）ja→zh 接近零样本、会输出英语或幻觉，不满足门槛。
  */
-export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = [M2M100_SPEC];
+export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = [M2M100_SPEC, M2M100_1_2B_SPEC];
 
 /** 默认本地翻译模型 id（轻量、全本地平台可用）。 */
 export const DEFAULT_TRANSLATION_MODEL_ID: LocalEngine = 'm2m100';

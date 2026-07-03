@@ -90,8 +90,8 @@ describe('本地翻译模型注册表', () => {
     }
   });
 
-  it('translationModelsFor 按平台过滤：macos/web 可用、ios 无本地模型', () => {
-    expect(translationModelsFor('macos').map((m) => m.id)).toEqual(['m2m100']);
+  it('translationModelsFor 按平台过滤：macos 两款、web 仅轻量款、ios 无本地模型', () => {
+    expect(translationModelsFor('macos').map((m) => m.id)).toEqual(['m2m100', 'm2m100-1.2b']);
     expect(translationModelsFor('web').map((m) => m.id)).toEqual(['m2m100']);
     expect(translationModelsFor('ios')).toEqual([]);
   });
