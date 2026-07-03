@@ -10,7 +10,7 @@ import type { CloudTranslationConfig, TranslationEngine } from '../../shared/typ
 export type { Translator, TranslateProgress };
 
 export interface TranslatorConfig {
-  /** 引擎：本地模型（注册表 id，如 m2m100 / mbart50）或云端 */
+  /** 引擎：本地模型（注册表 id，如 m2m100）或云端 */
   backend: TranslationEngine;
   /** [本地] 模型缓存目录（首次下载后离线复用） */
   cacheDir?: string;
