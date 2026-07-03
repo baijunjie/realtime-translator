@@ -59,24 +59,23 @@ describe('asrModelsFor', () => {
   });
 });
 
-describe('ASR 双源 URL（自托管主源 + 上游 fallback）', () => {
+describe('ASR 按端分源 URL（自托管 url + web 上游 webUrl）', () => {
   const GH_BASE = 'https://github.com/baijunjie/realtime-translator/releases/download/models-v1/';
 
-  it('公共依赖 VAD：主源为自托管无前缀资产，fallback 为上游 k2-fsa release', () => {
+  it('公共依赖 VAD：url 为自托管无前缀资产；web 用同源静态资源覆盖，故不设 webUrl', () => {
     expect(SILERO_VAD.url).toBe(`${GH_BASE}silero_vad.onnx`);
-    expect(SILERO_VAD.fallbackUrl).toBe(
-      'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx',
-    );
+    expect(SILERO_VAD.webUrl).toBeUndefined();
   });
 
-  it('各模型文件：主源为自托管资产（modelId- 前缀 + 原文件名），fallback 为上游 HF csukuangfj 直链', () => {
+  it('各模型文件：url 为自托管资产（modelId- 前缀 + 原文件名）；web 平台模型带上游 HF csukuangfj webUrl', () => {
     for (const m of ASR_MODELS) {
       for (const f of m.files) {
-        // 主源：github release，扁平命名 `<modelId>-<原文件名>`，以原文件名结尾。
+        // url：github release，扁平命名 `<modelId>-<原文件名>`，以原文件名结尾。
         expect(f.url).toBe(`${GH_BASE}${m.id}-${f.filename}`);
-        // fallback：上游 HF csukuangfj resolve 直链，以原文件名结尾。
-        expect(f.fallbackUrl).toMatch(/^https:\/\/huggingface\.co\/csukuangfj\/.+\/resolve\/main\//);
-        expect(f.fallbackUrl?.endsWith(f.filename)).toBe(true);
+        // 全部 ASR 模型 platforms 均含 web，故都带上游 webUrl（HF csukuangfj resolve 直链，以原文件名结尾）。
+        expect(m.platforms).toContain('web');
+        expect(f.webUrl).toMatch(/^https:\/\/huggingface\.co\/csukuangfj\/.+\/resolve\/main\//);
+        expect(f.webUrl?.endsWith(f.filename)).toBe(true);
       }
     }
   });

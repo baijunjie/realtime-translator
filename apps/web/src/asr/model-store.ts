@@ -13,7 +13,6 @@
 
 import {
   SILERO_VAD,
-  browserDownloadUrls,
   getAsrModel,
   requiredAsrFiles,
   type AsrModelFile,
@@ -32,22 +31,20 @@ function modelFiles(modelId: string): AsrModelFile[] {
 }
 
 // 浏览器跨源：GitHub Releases 不发 CORS 头（且 302 跳 S3），浏览器 fetch 会被拦。
-// Silero VAD 很小（~0.6MB）且其主源与上游均为 GitHub release（浏览器都取不到），故随应用
-// 同源托管在 public/models/（同源无 CORS、可即时离线），此覆盖优先级最高。
-// 各模型权重的自托管主源同样是 GitHub（web 取不到），由 browserDownloadUrls 跳过、改走上游 fallback。
+// Silero VAD 很小（~0.6MB）且其自托管源为 GitHub release（浏览器取不到），故随应用同源托管在
+// public/models/（同源无 CORS、可即时离线），此覆盖优先级最高、也是 VAD 的唯一 web 源。
+// 各模型权重按端分源：web 走注册表里发 CORS 头的上游源（file.webUrl）。
 const SAME_ORIGIN_BUNDLED: Record<string, string> = {
   'silero_vad.onnx': `${import.meta.env.BASE_URL}models/silero_vad.onnx`,
 };
 
 /**
- * 浏览器可依次尝试的 fetch 源（按优先级）：同源托管覆盖最高；其余按 browserDownloadUrls
- * 决策（GitHub 主源无 CORS 必跳过、改走上游 fallback；主源非 GitHub 则先主源后 fallback）。
- * 空数组表示浏览器端无可用源（downloadIntoCache 会报明确错误）。
+ * 浏览器端某文件的 web 下载源（按端分源、单源无回退）：同源托管覆盖优先（VAD），
+ * 否则用注册表的上游 web 源 file.webUrl。返回 undefined 表示无 web 端下载源
+ * （正常不可达——platforms 过滤已挡住 macOS 专属模型，downloadIntoCache 会报明确错误）。
  */
-function resolveUrls(file: AsrModelFile): string[] {
-  const bundled = SAME_ORIGIN_BUNDLED[file.filename];
-  const remote = browserDownloadUrls(file.url, file.fallbackUrl);
-  return bundled ? [bundled, ...remote] : remote;
+function resolveUrl(file: AsrModelFile): string | undefined {
+  return SAME_ORIGIN_BUNDLED[file.filename] ?? file.webUrl;
 }
 
 /** 聚合下载进度（与 @rt/core SetupProgress 同形）。 */
@@ -171,9 +168,8 @@ export function modelFileList(modelId: string): string[] {
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 下载单个文件并写入 Cache Storage：依次尝试 resolveUrls 的候选源（主源失败或停滞时回退到
- * 下一候选，全部失败才抛错）。回退重试会以新连接从头下载，onFileProgress 从 0 重新计数
- * （聚合进度里该文件的份额回退再爬升，是同文件重下的正确表现）。
+ * 下载单个文件并写入 Cache Storage：按端分源、单源无回退，只用 resolveUrl 给出的 web 源
+ * （同源覆盖或上游 webUrl）。无 web 源时报明确错误（正常不可达，见 resolveUrl）。
  */
 async function downloadIntoCache(
   cache: Cache,
@@ -181,20 +177,11 @@ async function downloadIntoCache(
   file: AsrModelFile,
   onFileProgress: (loaded: number) => void,
 ): Promise<void> {
-  const urls = resolveUrls(file);
-  if (urls.length === 0) {
-    throw new Error(`浏览器端无可用下载源: ${file.filename}`);
+  const url = resolveUrl(file);
+  if (!url) {
+    throw new Error(`该模型无 web 端下载源: ${file.filename}`);
   }
-  let lastErr: unknown;
-  for (const url of urls) {
-    try {
-      await fetchIntoCache(cache, key, url, file, onFileProgress);
-      return;
-    } catch (err) {
-      lastErr = err; // 还有候选源则继续回退重试；否则抛出末次错误
-    }
-  }
-  throw lastErr;
+  await fetchIntoCache(cache, key, url, file, onFileProgress);
 }
 
 /**

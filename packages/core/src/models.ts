@@ -17,13 +17,14 @@ function hfBase(repo: string): string {
 
 /** 单个需下载的 ASR 模型文件的平台无关描述。 */
 export interface AsrModelFile {
-  /** 主源下载地址（自托管 GitHub Release，Node 下载自动跟随重定向）。 */
+  /** 下载源（自托管 GitHub Release）：macOS/iOS 用，Node 下载自动跟随重定向。 */
   url: string;
   /**
-   * 上游 fallback 下载地址：主源（url）失效或停滞时回退。缺省表示无上游备源。
-   * web 端因 GitHub Release 无 CORS 头而只能走此上游源（见 model-assets.browserDownloadUrls）。
+   * web 端专用下载源（上游 HF 直链）：浏览器 fetch 受 CORS 约束，而自托管 GitHub Release
+   * 资产不发 CORS 头，故 web 改走发 CORS 头的上游源。仅 platforms 含 web 的模型需要；
+   * 公共依赖 Silero VAD（web 用同源静态资源覆盖）不设。
    */
-  fallbackUrl?: string;
+  webUrl?: string;
   /** 落地文件名。 */
   filename: string;
   /**
@@ -41,13 +42,12 @@ export interface AsrModelFile {
 }
 
 /**
- * Silero VAD：所有 ASR 模型共用的语音端点检测依赖。主源为自托管 GitHub Release（无前缀），
- * fallback 为上游 k2-fsa release 直链。不进模型选择列表，随任一模型一并下载（见 requiredAsrFiles）。
+ * Silero VAD：所有 ASR 模型共用的语音端点检测依赖。下载源为自托管 GitHub Release（无前缀）；
+ * web 端另由同源静态资源覆盖（见 web model-store），故不设 webUrl。不进模型选择列表，
+ * 随任一模型一并下载（见 requiredAsrFiles）。
  */
 export const SILERO_VAD: AsrModelFile = {
   url: ghModelAsset('silero_vad.onnx'),
-  fallbackUrl:
-    'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx',
   filename: 'silero_vad.onnx',
   dir: '',
   approxBytes: 643_854,
@@ -81,8 +81,8 @@ const REAZONSPEECH_JA_DIR = 'sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01';
 const PARAKEET_EN_DIR = 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8';
 
 /**
- * 构造一份 ASR 模型文件描述：主源 url 为自托管 GitHub Release 资产（扁平命名
- * `<modelId>-<原文件名>`），fallbackUrl 为上游 HF csukuangfj 直链（主源失效时回退）。
+ * 构造一份 ASR 模型文件描述：url 为自托管 GitHub Release 资产（扁平命名 `<modelId>-<原文件名>`，
+ * macOS/iOS 用）；webUrl 为上游 HF csukuangfj resolve 直链（web 用，发 CORS 头）。
  * 多数模型的 HF 仓名与本地子目录同名（dir 默认取 repo）；个别模型的权重个体文件来自
  * 另一命名的源仓（如 reazonspeech），此时显式传 dir。
  */
@@ -96,7 +96,7 @@ function asrFile(
 ): AsrModelFile {
   return {
     url: ghModelAsset(`${modelId}-${filename}`),
-    fallbackUrl: `${hfBase(repo)}/${filename}`,
+    webUrl: `${hfBase(repo)}/${filename}`,
     filename,
     dir,
     approxBytes,
@@ -138,7 +138,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     languages: ['ja'],
     engine: 'transducer',
     dir: REAZONSPEECH_JA_DIR,
-    // fallback 权重个体文件取自上游源仓 reazonspeech-k2-v2：预置包 sherpa-onnx-zipformer-ja-
+    // web 上游权重个体文件取自源仓 reazonspeech-k2-v2：预置包 sherpa-onnx-zipformer-ja-
     // reazonspeech-2024-08-01 仅以 GitHub release tar 包整体分发，无逐文件 HF 直链。
     // 落地目录沿用预置包命名，encoder/joiner 用 int8、decoder 用 fp32（该包约定）。
     files: [

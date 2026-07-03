@@ -10,8 +10,9 @@
 //   pnpm --filter @rt/ios gen:models --check   # 只校验已提交的生成物是否最新（CI 用）
 //
 // @rt/core 以源码 TS 形式发布（main: src/index.ts，靠 bundler 消费），普通 Node ESM
-// 无法直接 import。models.ts 是“纯数据 + 类型”、不 import 任何运行时模块，故这里只用
-// esbuild 把这一个文件转成 JS 后动态 import，绕开 @rt/core 整个 barrel 的解析。
+// 无法直接 import。models.ts 是“纯数据 + 类型”，仅依赖同目录的 model-assets.ts（构造
+// 自托管主源 URL 的纯逻辑），故这里用 esbuild 打包这一子图（内联 model-assets、擦除
+// type-only 的 ./types 引用）转成自包含 JS 后动态 import，绕开 @rt/core 整个 barrel 的解析。
 //
 // 生成物只包含 platforms 含 'ios' 的模型（iOS 目前仅 sense-voice）+ 公共依赖 Silero VAD。
 //
@@ -20,20 +21,25 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
-import { transform } from 'esbuild';
+import { build } from 'esbuild';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..', '..', '..');
 const modelsTs = path.join(repoRoot, 'packages', 'core', 'src', 'models.ts');
 const outPath = path.join(here, '..', 'ios', 'AsrModels.swift');
 
-const tsSource = fs.readFileSync(modelsTs, 'utf8');
-const { code: jsSource } = await transform(tsSource, {
-  loader: 'ts',
+// esbuild 打包 models.ts 这一子图：内联其唯一运行时依赖 model-assets.ts、擦除 type-only
+// 的 ./types 引用，产出自包含 ESM（不写盘）。
+const { outputFiles } = await build({
+  entryPoints: [modelsTs],
+  bundle: true,
   format: 'esm',
+  platform: 'node',
   target: 'esnext',
+  write: false,
 });
-// 以 data: URL 动态 import，拿到登记表常量（models.ts 不依赖其他运行时模块，安全）。
+const jsSource = outputFiles[0].text;
+// 以 data: URL 动态 import，拿到登记表常量。
 const dataUrl = 'data:text/javascript;base64,' + Buffer.from(jsSource).toString('base64');
 const { ASR_MODELS, SILERO_VAD, DEFAULT_ASR_MODEL_ID } = await import(dataUrl);
 
@@ -81,7 +87,7 @@ import Foundation
 
 /// 单个需下载的 ASR 模型文件（对应 @rt/core 的 AsrModelFile）。
 struct AsrModelFile {
-  /// 远程下载地址（URLSession 会自动跟随 GitHub/HF 重定向）。
+  /// 下载地址（自托管 GitHub Release 资产；URLSession 自动跟随重定向）。
   let url: String
   /// 落地文件名。
   let filename: String

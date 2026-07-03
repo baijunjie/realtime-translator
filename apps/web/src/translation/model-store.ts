@@ -4,15 +4,14 @@
 // 的缓存键」写入 Cache Storage，之后翻译 Worker 以 allowRemoteModels=false 离线加载。
 //
 // 下载源 URL 与缓存键解耦（这是本模块的关键）：
-//  - 下载源 = spec.files[].url（当前是 HF resolve 直链；未来大模型可换 GitHub Releases 扁平直链）。
+//  - 下载源 = spec.files[].webUrl（web 端专用上游 HF resolve 直链；按端分源，web 不走自托管 url）。
 //  - 缓存键 = Transformers.js 浏览器端对该文件实际发起请求时用的键。查证 @huggingface/transformers
 //    的 src/utils/hub.js（buildResourcePaths）：非 FileCache（浏览器原生 Cache）时
 //    proposedCacheKey = remoteURL = env.remoteHost + '{model}/resolve/{revision}/' + 文件路径，
 //    默认 remoteHost='https://huggingface.co/'、revision='main'。存进这个键，离线加载才能命中。
-//  对 m2m100 两者恰好同为 HF URL；对未来 GitHub 源，缓存键仍按 modelId 构造成 HF 目录式布局。
+//  对 m2m100 下载源与缓存键恰好同为 HF URL；缓存键始终按 modelId 构造成 HF 目录式布局，与下载源无关。
 
 import {
-  browserDownloadUrls,
   hasAllWeightFiles,
   type LocalModelSpec,
   type LocalModelFile,
@@ -106,10 +105,9 @@ export async function deleteTranslationModelFromCache(spec: LocalModelSpec): Pro
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 下载单个文件并以 key 写入 Cache Storage：依次尝试 browserDownloadUrls 的候选源（GitHub 主源
- * 无 CORS 必跳过、改走上游 fallback；主源非 GitHub 则先主源后 fallback；主源失败或停滞时回退到
- * 下一候选，全部失败才抛错）。回退重试以新连接从头下载，onFileProgress 从 0 重新计数（聚合进度里
- * 该文件的份额回退再爬升，是同文件重下的正确表现）。
+ * 下载单个文件并以 key 写入 Cache Storage：按端分源、单源无回退，web 只用注册表的上游源
+ * file.webUrl（发 CORS 头）。无 webUrl 时报明确错误（正常不可达——platforms 过滤已挡住
+ * macOS 专属模型如 1.2B）。
  */
 async function downloadIntoCache(
   cache: Cache,
@@ -117,20 +115,11 @@ async function downloadIntoCache(
   file: LocalModelFile,
   onFileProgress: (received: number) => void,
 ): Promise<void> {
-  const urls = browserDownloadUrls(file.url, file.fallbackUrl);
-  if (urls.length === 0) {
-    throw new Error(`浏览器端无可用下载源: ${file.filename}`);
+  const url = file.webUrl;
+  if (!url) {
+    throw new Error(`该模型无 web 端下载源: ${file.filename}`);
   }
-  let lastErr: unknown;
-  for (const url of urls) {
-    try {
-      await fetchIntoCache(cache, key, url, file, onFileProgress);
-      return;
-    } catch (err) {
-      lastErr = err; // 还有候选源则继续回退重试；否则抛出末次错误
-    }
-  }
-  throw lastErr;
+  await fetchIntoCache(cache, key, url, file, onFileProgress);
 }
 
 /**

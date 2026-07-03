@@ -32,13 +32,14 @@ export interface LangEntry {
  * 以 allowRemoteModels=false 离线加载）。与 ASR 的 AsrModelFile 同理——注册表声明 URL，各端自行下载。
  */
 export interface LocalModelFile {
-  /** 主源下载地址（自托管 GitHub Release 扁平直链，与缓存键解耦）。 */
+  /** 下载源（自托管 GitHub Release 扁平直链，与缓存键解耦）：macOS 用。 */
   url: string;
   /**
-   * 上游 fallback 下载地址：主源（url）失效或停滞时回退。缺省表示无上游备源。
-   * web 端因 GitHub Release 无 CORS 头而只能走此上游源（见 model-assets.browserDownloadUrls）。
+   * web 端专用下载源（上游 HF resolve 直链）：浏览器 fetch 受 CORS 约束，而自托管 GitHub
+   * Release 资产不发 CORS 头，故 web 改走发 CORS 头的上游源。仅 platforms 含 web 的模型需要；
+   * macOS 专属模型（如 1.2B）不设。
    */
-  fallbackUrl?: string;
+  webUrl?: string;
   /** 落地文件名（如 encoder_model_quantized.onnx）。 */
   filename: string;
   /**
@@ -88,15 +89,15 @@ export function hasAllWeightFiles(spec: LocalModelSpec, cached: string[]): boole
 // M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
 const M2M100_REPO = 'Xenova/m2m100_418M';
 /**
- * 构造 M2M100-418M 的一个待下载文件：主源 url 为自托管 GitHub Release 资产（扁平命名
- * `m2m100_418M-<原文件名>`，与 1.2B 前缀风格一致），fallbackUrl 为上游 Xenova HF resolve 直链。
- * dir 仅为缓存布局子目录（'' 或 'onnx'），与下载源 URL 解耦。
+ * 构造 M2M100-418M 的一个待下载文件：url 为自托管 GitHub Release 资产（扁平命名
+ * `m2m100_418M-<原文件名>`，与 1.2B 前缀风格一致，macOS 用）；webUrl 为上游 Xenova HF
+ * resolve 直链（web 用，发 CORS 头）。dir 仅为缓存布局子目录（'' 或 'onnx'），与下载源 URL 解耦。
  */
 function m2m100File(dir: string, filename: string): LocalModelFile {
   const rel = dir ? `${dir}/${filename}` : filename;
   return {
     url: ghModelAsset(`m2m100_418M-${filename}`),
-    fallbackUrl: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`,
+    webUrl: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`,
     filename,
     dir,
   };
@@ -138,8 +139,8 @@ export const M2M100_SPEC: LocalModelSpec = {
 };
 
 // M2M100-1.2B（MIT，质量档）。官方无 ONNX 发布，权重经 optimum 导出 + 合并 decoder + q8 量化后
-// 自托管于本仓库 GitHub Release（models-v1，资产名带 m2m100_1.2B- 前缀的扁平文件）；无上游镜像，
-// 故不设 fallbackUrl（唯一源）。modelId 仅作 Transformers.js 缓存布局键，不对应 HuggingFace 仓库。
+// 自托管于本仓库 GitHub Release（models-v1，资产名带 m2m100_1.2B- 前缀的扁平文件）；仅 macOS 支持、
+// 无上游镜像，故不设 webUrl（唯一源）。modelId 仅作 Transformers.js 缓存布局键，不对应 HuggingFace 仓库。
 function m2m1002bFile(dir: string, filename: string): LocalModelFile {
   return { url: ghModelAsset(`m2m100_1.2B-${filename}`), filename, dir };
 }

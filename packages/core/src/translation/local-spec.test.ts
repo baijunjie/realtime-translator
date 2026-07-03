@@ -85,25 +85,25 @@ describe('本地翻译模型注册表', () => {
         'onnx/decoder_model_merged_quantized.onnx',
       ]),
     );
-    // 双源：主源为自托管 GitHub Release 资产（扁平命名带 m2m100_418M- 前缀），
-    // fallback 为上游 Xenova/m2m100_418M 仓 main 分支 resolve 直链（含缓存布局子目录）。
+    // 按端分源：url 为自托管 GitHub Release 资产（扁平命名带 m2m100_418M- 前缀，macOS 用）；
+    // webUrl 为上游 Xenova/m2m100_418M 仓 main 分支 resolve 直链（含缓存布局子目录，web 用）。
     for (const f of M2M100_SPEC.files) {
       expect(f.url).toBe(
         `https://github.com/baijunjie/realtime-translator/releases/download/models-v1/m2m100_418M-${f.filename}`,
       );
       const rel = f.dir ? `${f.dir}/${f.filename}` : f.filename;
-      expect(f.fallbackUrl).toBe(`https://huggingface.co/Xenova/m2m100_418M/resolve/main/${rel}`);
+      expect(f.webUrl).toBe(`https://huggingface.co/Xenova/m2m100_418M/resolve/main/${rel}`);
     }
   });
 
-  it('M2M100-1.2B 为自托管唯一源：主源带 m2m100_1.2B- 前缀，无上游 fallback', () => {
+  it('M2M100-1.2B 为自托管唯一源（仅 macOS）：url 带 m2m100_1.2B- 前缀，无 web 端 webUrl', () => {
     const spec = LOCAL_TRANSLATION_MODELS.find((m) => m.id === 'm2m100-1.2b');
     expect(spec).toBeDefined();
     for (const f of spec!.files) {
       expect(f.url).toBe(
         `https://github.com/baijunjie/realtime-translator/releases/download/models-v1/m2m100_1.2B-${f.filename}`,
       );
-      expect(f.fallbackUrl).toBeUndefined();
+      expect(f.webUrl).toBeUndefined();
     }
   });
 
