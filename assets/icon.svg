@@ -6,28 +6,28 @@
        文字用基线定位（不用 dominant-baseline），保证 sharp/resvg 与浏览器渲染一致、不偏移。 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#FFF0DC"/>
-      <stop offset="0.55" stop-color="#FFD8C6"/>
-      <stop offset="1" stop-color="#FFB9C9"/>
+      <stop offset="0" stop-color="#FFCB7A"/>
+      <stop offset="0.55" stop-color="#FF9A7E"/>
+      <stop offset="1" stop-color="#FF6D9F"/>
     </linearGradient>
     <radialGradient id="bgGlow" cx="0.32" cy="0.2" r="0.85">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.55"/>
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.2"/>
       <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="coral" x1="0" y1="0" x2="0.4" y2="1">
-      <stop offset="0" stop-color="#FF8DA1"/>
-      <stop offset="1" stop-color="#FF5C7E"/>
+      <stop offset="0" stop-color="#FF7290"/>
+      <stop offset="1" stop-color="#F52F63"/>
     </linearGradient>
     <linearGradient id="sun" x1="0" y1="0" x2="0.4" y2="1">
-      <stop offset="0" stop-color="#FFD36E"/>
-      <stop offset="1" stop-color="#FFB638"/>
+      <stop offset="0" stop-color="#FFC94F"/>
+      <stop offset="1" stop-color="#FF9E14"/>
     </linearGradient>
     <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.35"/>
       <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
     </linearGradient>
     <filter id="drop" x="-40%" y="-40%" width="180%" height="180%">
-      <feDropShadow dx="0" dy="16" stdDeviation="22" flood-color="#C9555F" flood-opacity="0.30"/>
+      <feDropShadow dx="0" dy="16" stdDeviation="22" flood-color="#A8324B" flood-opacity="0.34"/>
     </filter>
   </defs>
 
