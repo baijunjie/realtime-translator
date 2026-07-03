@@ -338,6 +338,16 @@ function ensureAsr(): Promise<void> {
 }
 
 ipcMain.handle('pipeline:start', async (): Promise<StartResult> => {
+  // 系统音频 + 开发模式提示：CoreAudio Tap 的 TCC 责任进程是「启动 Electron 的父程序」——
+  // 从终端/IDE 跑 dev 时责任落在终端/IDE，它们的 Info.plist 没有 NSAudioCaptureUsageDescription，
+  // macOS 会给一条不弹窗、无报错的**静音流**。解法：给终端/IDE 手动授予「仅录制系统音频」权限，
+  // 或用打包产物验证（应用自身 Info.plist 已带该 key，不受影响）。
+  if (!app.isPackaged && effectiveSettings().audioSource === 'system') {
+    console.warn(
+      '[system-audio] dev 模式下若采集到的系统音频为静音：请在 系统设置 → 隐私与安全性 → ' +
+        '屏幕与系统音频录制 → 仅录制系统音频 中加入你的终端/IDE，或用打包应用验证'
+    );
+  }
   // 仅麦克风音源需申请麦克风权限；系统音频音源不触碰麦克风权限
   // （系统音频的录制授权在渲染层 getDisplayMedia 时由系统弹出，见 mac-bridge）。
   if (effectiveSettings().audioSource === 'mic' && process.platform === 'darwin') {
