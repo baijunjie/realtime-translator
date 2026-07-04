@@ -122,7 +122,7 @@ flowchart LR
     HUB["転送 / 調停"]
   end
   subgraph UTIL["隔離された子プロセス"]
-    ASR["ASR（utilityProcess）：Silero VAD → SenseVoice<br/>(zh / en / ja / ko / yue)<br/>発話中→途中認識 · 区切り→確定結果"]
+    ASR["ASR（utilityProcess）：Silero VAD → 認識モデル<br/>（既定 SenseVoice · 言語別専用モデル選択可）<br/>発話中→途中認識 · 区切り→確定結果"]
     TRANS["翻訳（純粋な Node 子プロセス）：M2M100<br/>· またはクラウド（OpenAI 互換）"]
   end
   MIC -- "IPC：音声" --> HUB

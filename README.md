@@ -122,7 +122,7 @@ flowchart LR
     HUB["forward / orchestrate"]
   end
   subgraph UTIL["isolated subprocesses"]
-    ASR["ASR (utilityProcess): Silero VAD → SenseVoice<br/>(zh / en / ja / ko / yue)<br/>partial while speaking · final on segment end"]
+    ASR["ASR (utilityProcess): Silero VAD → recognition model<br/>(SenseVoice default · per-language models selectable)<br/>partial while speaking · final on segment end"]
     TRANS["Translation (plain Node child process): M2M100<br/>· or Cloud (OpenAI-compatible)"]
   end
   MIC -- "IPC: audio" --> HUB

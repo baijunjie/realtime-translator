@@ -122,7 +122,7 @@ flowchart LR
     HUB["전달 / 조정"]
   end
   subgraph UTIL["격리된 자식 프로세스"]
-    ASR["ASR(utilityProcess): Silero VAD → SenseVoice<br/>(zh / en / ja / ko / yue)<br/>말하는 중→부분 인식 · 구간 종료→최종 결과"]
+    ASR["ASR(utilityProcess): Silero VAD → 인식 모델<br/>(기본 SenseVoice · 언어별 전용 모델 선택 가능)<br/>말하는 중→부분 인식 · 구간 종료→최종 결과"]
     TRANS["번역(순수 Node 자식 프로세스): M2M100<br/>· 또는 클라우드(OpenAI 호환)"]
   end
   MIC -- "IPC: 오디오" --> HUB

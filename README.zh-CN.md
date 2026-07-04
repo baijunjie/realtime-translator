@@ -122,7 +122,7 @@ flowchart LR
     HUB["转发 / 调度"]
   end
   subgraph UTIL["隔离子进程"]
-    ASR["ASR（utilityProcess）：Silero VAD → SenseVoice<br/>(zh / en / ja / ko / yue)<br/>说话中→部分识别 · 段结束→最终结果"]
+    ASR["ASR（utilityProcess）：Silero VAD → 识别模型<br/>（默认 SenseVoice · 可选各语言专用模型）<br/>说话中→部分识别 · 段结束→最终结果"]
     TRANS["翻译（纯 Node 子进程）：M2M100<br/>· 或云端（OpenAI 兼容）"]
   end
   MIC -- "IPC：音频" --> HUB
