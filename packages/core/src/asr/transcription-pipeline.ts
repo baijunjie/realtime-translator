@@ -40,6 +40,11 @@ const PARTIAL_MAX_WINDOW_SECONDS = 8;
 // （见 finalizeSegment）；更短的段按噪音丢弃。
 const SALVAGE_MIN_SECONDS = 2;
 
+// 单次解码的最短输入时长：transducer 类模型（zipformer/NeMo）的卷积下采样对过短输入
+// 会在原生层抛异常——JS 无法捕获，识别子进程直接终止（实测 reazonspeech zipformer 的
+// 崩溃边界为 0.1s，取 0.5s 留裕量）。不足时补零凑齐再解码，对识别结果无影响。
+const MIN_DECODE_SECONDS = 0.5;
+
 // 连续重复达到这个次数才视为退化（复读机幻觉），折叠
 const REPEAT_MIN = 4;
 // 折叠后保留的份数（保留少量，既不刷屏又能看出原文带重复）
@@ -359,6 +364,13 @@ export class TranscriptionPipeline {
 
   /** 引擎原始输出的统一清理：文本去噪 + 剥离 SenseVoice 的 <|zh|> 语言标记 */
   private transcribe(samples: Float32Array): { text: string; lang: string } {
+    // 过短输入补零到最短解码时长（见 MIN_DECODE_SECONDS：原生层对超短输入会崩掉子进程）
+    const minSamples = Math.round(MIN_DECODE_SECONDS * SAMPLE_RATE);
+    if (samples.length < minSamples) {
+      const padded = new Float32Array(minSamples);
+      padded.set(samples);
+      samples = padded;
+    }
     const raw = this.engine.transcribe(samples);
     return {
       text: cleanAsrText(raw.text || ''),

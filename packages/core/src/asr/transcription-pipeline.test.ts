@@ -257,3 +257,26 @@ describe('定稿抢救（定稿解码无实文时用最近 partial 顶替）', (
     expect(h.segments[0].text).toBe('第一段');
   });
 });
+
+describe('最短解码时长（过短输入补零，防原生层崩溃）', () => {
+  it('任何一次送引擎解码的音频都不短于 0.5s', () => {
+    const h = makeHarness();
+    const received: number[] = [];
+    const orig = h.engine.transcribe.bind(h.engine);
+    h.engine.transcribe = (samples: Float32Array) => {
+      received.push(samples.length);
+      return orig(samples);
+    };
+    // 场景：上一段定稿后新语音立即开始（首个 partial 窗口极短）+ 极短语音段定稿
+    h.engine.result = { text: '第一段', lang: '<|ja|>' };
+    h.feed(3, true);
+    h.feed(0.5, false); // 定稿第一段
+    h.feed(0.1, true); // 新段仅 0.1s 即静音（超短 partial/定稿窗口）
+    h.feed(0.5, false);
+    h.pipeline.flush();
+    expect(received.length).toBeGreaterThan(0);
+    for (const n of received) {
+      expect(n).toBeGreaterThanOrEqual(0.5 * SAMPLE_RATE);
+    }
+  });
+});
