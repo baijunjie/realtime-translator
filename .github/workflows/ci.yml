@@ -1,8 +1,10 @@
 # 质量门禁 + Web 部署（同一工作流的依赖链：check 全绿才部署）。
 # - check：core 单元测试 + 三端 type-check。不下载 Electron 二进制
 #   （ELECTRON_SKIP_BINARY_DOWNLOAD=1）：类型检查只需要包内的 TS 类型声明。
-# - deploy-web：仅 main 分支 push（或手动触发）且 check 通过后，构建 apps/web
-#   并部署到 GitHub Pages——坏代码进不了线上 PWA。
+# - changes：轻量探测本次改动是否涉及 web（apps/web 及其依赖）。
+# - deploy-web：仅 main 分支 push（或手动触发）、check 通过、且 changes 判定
+#   涉及 web 时，才构建 apps/web 并部署到 GitHub Pages——坏代码进不了线上 PWA，
+#   与 web 无关的提交（docs / macOS / iOS）也不再空跑一次 Pages 部署。
 name: CI
 
 on:
@@ -11,25 +13,27 @@ on:
   pull_request:
   workflow_dispatch: {} # 手动触发（含部署），合并到 main 前先验证用
 
-# 同一分支/PR 只保留最新一次运行，新触发取消进行中的。
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
+# 并发策略按职责分组（不在工作流级统一取消，否则新 push 会连同进行中的
+# 部署一起被取消，触发 Pages 后端竞态失败）：
+# - check：同分支/PR 只留最新，取消进行中的冗余测试跑，省 CI 时间。
+# - deploy-web：见该 job 内的 concurrency，进行中的部署绝不中途取消。
 permissions:
   contents: read
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: check-${{ github.ref }}
+      cancel-in-progress: true
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
       - uses: actions/checkout@v4
 
+      # pnpm 版本由根 package.json 的 packageManager 字段单一确定，不在此处再固定。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
@@ -50,21 +54,54 @@ jobs:
       - name: Type-check (@rt/ios)
         run: pnpm --filter @rt/ios type-check
 
+  # 探测本次改动是否影响 web 产物：只在 main push 时计算（手动触发一律部署，
+  # 故该场景跳过探测、输出回退为 true）。改动仅涉及 macOS/iOS/docs 时 web=false，
+  # 下游 deploy-web 直接跳过，省一次 Pages 部署并缩小其后端竞态的暴露面。
+  changes:
+    needs: check
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      # 探测步骤被跳过（手动触发）时 outputs.web 为空 → 回退为 'true'。
+      web: ${{ steps.filter.outputs.web || 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'push'
+        with:
+          # web 产物 = apps/web + 其工作区依赖（@rt/core、@rt/ui）+ 影响装依赖/构建的根文件。
+          filters: |
+            web:
+              - 'apps/web/**'
+              - 'packages/core/**'
+              - 'packages/ui/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'package.json'
+              - '.github/workflows/ci.yml'
+
   # 构建 apps/web（浏览器 PWA）并部署到 GitHub Pages。
   # Pages 项目站点服务于 https://<user>.github.io/<repo>/，故 base 设为 /<repo>/。
   # 仓库 Settings → Pages → Build and deployment → Source 需选「GitHub Actions」。
   deploy-web:
-    needs: check
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: [check, changes]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.web == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: write
       id-token: write
-    # 同一时刻只跑一个部署，新触发取消进行中的。
+    # 同一时刻只跑一个部署：进行中的部署必须完整跑完（中途取消会让 Pages
+    # 后端处于半完成状态，导致后续 run 报 "Deployment failed, try again later"
+    # 或 "Multiple artifacts" 的竞态）。排队时只保留最新一次。
     concurrency:
       group: pages
-      cancel-in-progress: true
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -72,8 +109,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - uses: actions/setup-node@v4
         with:
