@@ -18,6 +18,12 @@ body,
 #app {
   height: 100%;
   margin: 0;
+  /* 移动端禁用整页橡皮筋/回弹（overscroll bounce）：本应用是定高全屏界面，
+     文档级本不需要滚动，所有滚动都发生在内部 ScrollArea 里。
+     overflow:hidden 断掉文档级滚动容器，overscroll-behavior:none 兜底关闭回弹链；
+     桌面端无副作用。 */
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {

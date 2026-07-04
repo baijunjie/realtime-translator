@@ -302,12 +302,12 @@ function openMicSettings(): void {
 
       <div class="flex-1" />
 
-      <!-- 模型加载状态：顶栏内联，窄屏只留转圈图标；hover 看具体加载项 -->
+      <!-- 模型加载状态：顶栏内联，转圈图标 + 文案；hover 看具体加载项 -->
       <n-tooltip v-if="loadingItems.length">
         <template #trigger>
           <div class="flex items-center gap-2 text-xs text-neutral-500 dark:text-neutral-400">
             <LoaderCircle :size="14" class="animate-spin" />
-            <span class="max-sm:hidden">{{ loadingSummary }}</span>
+            <span>{{ loadingSummary }}</span>
           </div>
         </template>
         <div v-for="item in loadingItems" :key="item">{{ item }}</div>
@@ -323,24 +323,14 @@ function openMicSettings(): void {
       <!-- 窄屏隐藏，改用下方「...」菜单与底部圆形录音按钮 -->
       <div class="flex items-center gap-3.5 max-sm:hidden">
         <!-- NDropdown 无 disabled 属性：无内容或录音锁定时直接渲染禁用按钮，避免仍能弹出菜单 -->
-        <n-dropdown v-if="hasContent && !headerLocked" trigger="click" :options="clearOptions" @select="onClearSelect">
-          <n-tooltip>
-            <template #trigger>
-              <n-button quaternary circle :aria-label="t('main.clear')">
-                <template #icon><Eraser :size="18" /></template>
-              </n-button>
-            </template>
-            {{ t('main.clear') }}
-          </n-tooltip>
+        <n-dropdown v-if="hasContent && !headerLocked" trigger="hover" :options="clearOptions" @select="onClearSelect">
+          <n-button quaternary circle :aria-label="t('main.clear')">
+            <template #icon><Eraser :size="18" /></template>
+          </n-button>
         </n-dropdown>
-        <n-tooltip v-else>
-          <template #trigger>
-            <n-button quaternary circle disabled :aria-label="t('main.clear')">
-              <template #icon><Eraser :size="18" /></template>
-            </n-button>
-          </template>
-          {{ t('main.clear') }}
-        </n-tooltip>
+        <n-button v-else quaternary circle disabled :aria-label="t('main.clear')">
+          <template #icon><Eraser :size="18" /></template>
+        </n-button>
         <n-tooltip>
           <template #trigger>
             <n-button quaternary circle :disabled="headerLocked" :aria-label="t('main.viewArchives')" @click="$emit('open-archive')">
@@ -395,23 +385,13 @@ function openMicSettings(): void {
           :options="mobileMenuOptions"
           @select="onMobileMenuSelect"
         >
-          <n-tooltip>
-            <template #trigger>
-              <n-button quaternary circle :aria-label="t('main.menu')">
-                <template #icon><MoreHorizontal :size="20" /></template>
-              </n-button>
-            </template>
-            {{ t('main.menu') }}
-          </n-tooltip>
+          <n-button quaternary circle :aria-label="t('main.menu')">
+            <template #icon><MoreHorizontal :size="20" /></template>
+          </n-button>
         </n-dropdown>
-        <n-tooltip v-else>
-          <template #trigger>
-            <n-button quaternary circle disabled :aria-label="t('main.menu')">
-              <template #icon><MoreHorizontal :size="20" /></template>
-            </n-button>
-          </template>
-          {{ t('main.menu') }}
-        </n-tooltip>
+        <n-button v-else quaternary circle disabled :aria-label="t('main.menu')">
+          <template #icon><MoreHorizontal :size="20" /></template>
+        </n-button>
       </div>
     </header>
 
