@@ -294,3 +294,37 @@ describe('强切重叠回看', () => {
     expect(gap).toBeCloseTo(-0.4, 1); // 负值 = 重叠回看
   });
 });
+
+describe('坍缩定稿抢救（定稿远短于本段最佳 partial）', () => {
+  it('交叠语音式坍缩：6.7s 段定稿只剩「はい」→ 用最佳 partial 顶替', () => {
+    const h = makeHarness();
+    // partial 阶段给出完整长文
+    h.engine.result = { text: 'こんにちは証券投資調査部の島田です', lang: '<|ja|>' };
+    h.feed(3, true);
+    // 后续 partial 与定稿都坍缩为短语
+    h.engine.result = { text: 'はい', lang: '<|ja|>' };
+    h.feed(3.5, true);
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('こんにちは証券投資調査部の島田です');
+  });
+
+  it('正常情形：定稿与最佳 partial 相当 → 保留定稿', () => {
+    const h = makeHarness();
+    h.engine.result = { text: 'まず指数から振り返っていきたいと思います', lang: '<|ja|>' };
+    h.feed(5, true);
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('まず指数から振り返っていきたいと思います');
+  });
+
+  it('最佳 partial 本身很短（低于最少码点）→ 不触发坍缩抢救', () => {
+    const h = makeHarness();
+    h.engine.result = { text: 'はい', lang: '<|ja|>' };
+    h.feed(3, true);
+    h.engine.result = { text: 'ええ', lang: '<|ja|>' };
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('ええ');
+  });
+});

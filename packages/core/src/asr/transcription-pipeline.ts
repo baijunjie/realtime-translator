@@ -39,9 +39,14 @@ const PARTIAL_LOOKBACK_SECONDS = 0.6;
 // 否则单次解码会超过实时、拖垮宿主线程，导致 VAD 段迟迟无法闭合（不出定稿、不翻译）
 const PARTIAL_MAX_WINDOW_SECONDS = 8;
 
-// 定稿抢救的最短段长：段长达到该值仍解码不出实文时，用最近一次 partial 文本抢救定稿
-// （见 finalizeSegment）；更短的段按噪音丢弃。
+// 定稿抢救的最短段长：段长达到该值、定稿解码无实文或严重坍缩时，用本段最佳 partial
+// 文本抢救定稿（见 finalizeSegment）；更短的段按噪音丢弃。
 const SALVAGE_MIN_SECONDS = 2;
+// 坍缩判定：定稿文本码点数 < 本段最佳 partial 的该比例，且最佳 partial 达到最少码点数时，
+// 视为定稿解码退化（交叠语音等场景下 transducer 类模型会把长音频坍缩成「はい」级短语），
+// 用最佳 partial 顶替。比例取保守值，避免误伤「定稿略短于 partial」的正常情形。
+const COLLAPSE_RATIO = 0.4;
+const COLLAPSE_MIN_PARTIAL_CHARS = 6;
 
 // 单次解码的最短输入时长：transducer 类模型（zipformer/NeMo）的卷积下采样对过短输入
 // 会在原生层抛异常——JS 无法捕获，识别子进程直接终止（实测 reazonspeech zipformer 的
@@ -167,8 +172,8 @@ export class TranscriptionPipeline {
   private speechEnd = 0; // 最近一次检测到语音的采样位置（用于静音去抖与段尾）
   private partialFloor = 0; // 已最终确定的音频边界，部分识别不回看到此之前
   private lastPartialAt = 0; // 上次做部分识别时的 totalSamples
-  // 最近一次有实文的 partial 结果：定稿解码无实文时用于抢救长段（见 finalizeSegment）
-  private lastPartial: { text: string; lang: string } | null = null;
+  // 本段最佳（最长实文）partial 结果：定稿解码无实文或坍缩时用于抢救（见 finalizeSegment）
+  private bestPartial: { text: string; lang: string } | null = null;
   private partialGap = Math.round(PARTIAL_INTERVAL_SECONDS * SAMPLE_RATE); // 自适应间隔（采样）
 
   private readonly onLog: (line: string) => void;
@@ -342,8 +347,11 @@ export class TranscriptionPipeline {
     );
     if (result.text) {
       this.onPartial({ text: result.text });
-      // 留作定稿失败时的抢救文本（见 finalizeSegment）：记录本次 partial 及其语言
-      this.lastPartial = result;
+      // 留作定稿失败/坍缩时的抢救文本（见 finalizeSegment）：保留本段最长的一次 partial。
+      // 交叠语音下逐次 partial 会震荡（长文与「はい」级短语交替），最长者信息量最大。
+      if (!this.bestPartial || Array.from(result.text).length > Array.from(this.bestPartial.text).length) {
+        this.bestPartial = result;
+      }
     }
     this.lastPartialAt = this.totalSamples;
   }
@@ -359,25 +367,32 @@ export class TranscriptionPipeline {
     this.onLog(
       `finalize win=[${this.ts(from)},${this.ts(to)}] dur=${((to - from) / SAMPLE_RATE).toFixed(2)}s raw="${result.text}"`
     );
+    // 定稿解码可能劣于逐次 partial（两者是独立解码）：无实文，或在交叠语音等场景下
+    // 坍缩成远短于本段最佳 partial 的碎片。长段（说明确实在说话，且识别区已给用户
+    // 看过 partial 文本）用本段最佳 partial 抢救定稿，避免内容无声丢失；
+    // 短段维持丢弃（短噪音常被识别成「。」，本过滤即为此而设）。
+    const longEnough = to - from >= SALVAGE_MIN_SECONDS * SAMPLE_RATE;
+    const best =
+      this.bestPartial && /[\p{L}\p{N}]/u.test(this.bestPartial.text) ? this.bestPartial : null;
     if (!result.text || !/[\p{L}\p{N}]/u.test(result.text)) {
-      // 定稿解码无实文（整段重解码与逐次 partial 是独立两遍，结果可能不同）。
-      // 长段（说明确实在说话，且识别区已给用户看过 partial 文本）用最近一次 partial 抢救定稿，
-      // 避免整段无声丢失——用户看到的文字消失且历史里不留痕迹；
-      // 短段维持丢弃（短噪音常被识别成「。」，本过滤即为此而设）。
-      const salvageable =
-        to - from >= SALVAGE_MIN_SECONDS * SAMPLE_RATE &&
-        this.lastPartial &&
-        /[\p{L}\p{N}]/u.test(this.lastPartial.text);
-      if (!salvageable) {
+      if (!longEnough || !best) {
         this.onLog(`finalize → DROP (无实文且不满足抢救条件)`);
-        this.lastPartial = null;
+        this.bestPartial = null;
         this.onPartial({ text: '' }); // 无确定文本被丢弃：清空识别区，回到「聆听中」
         return;
       }
-      result = this.lastPartial!;
-      this.onLog(`finalize → SALVAGE text="${result.text}"`);
+      result = best;
+      this.onLog(`finalize → SALVAGE(empty) text="${result.text}"`);
+    } else if (
+      longEnough &&
+      best &&
+      Array.from(best.text).length >= COLLAPSE_MIN_PARTIAL_CHARS &&
+      Array.from(result.text).length < COLLAPSE_RATIO * Array.from(best.text).length
+    ) {
+      result = best;
+      this.onLog(`finalize → SALVAGE(collapse) text="${result.text}"`);
     }
-    this.lastPartial = null;
+    this.bestPartial = null;
 
     // 有结果时不在此处清 partial：整段最终解码是独立的一遍、比逐次 partial 慢，
     // 若解码前就清空识别区，会先空、解码完才上屏，造成"识别区文字消失→确定句延迟出现"的断档。
