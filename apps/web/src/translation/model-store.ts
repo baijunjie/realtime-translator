@@ -12,6 +12,7 @@
 //  对 m2m100 下载源与缓存键恰好同为 HF URL；缓存键始终按 modelId 构造成 HF 目录式布局，与下载源无关。
 
 import {
+  TRANSFORMERS_REMOTE_HOST,
   type LocalModelSpec,
   type LocalModelFile,
 } from '@rt/core';
@@ -32,7 +33,9 @@ export interface DownloadProgress {
  */
 function cacheKey(modelId: string, file: LocalModelFile): string {
   const rel = file.dir ? `${file.dir}/${file.filename}` : file.filename;
-  return `https://huggingface.co/${modelId}/resolve/main/${rel}`;
+  // 缓存键主机恒用 Transformers.js 默认 remoteHost（不可变，见 @rt/core model-sources 的
+  // TRANSFORMERS_REMOTE_HOST）——与可切换镜像的下载源严格分离，否则离线加载 cache.match 落空。
+  return `${TRANSFORMERS_REMOTE_HOST}${modelId}/resolve/main/${rel}`;
 }
 
 /**
@@ -108,9 +111,9 @@ export async function deleteTranslationModelFromCache(spec: LocalModelSpec): Pro
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 下载单个文件并以 key 写入 Cache Storage：按端分源、单源无回退，web 只用注册表的上游源
- * file.webUrl（发 CORS 头）。无 webUrl 时报明确错误（正常不可达——platforms 过滤已挡住
- * macOS 专属模型如 1.2B）。
+ * 下载单个文件并以 key 写入 Cache Storage：按注册表上游有序源 file.webUrls（HF 主源 + 镜像，发 CORS 头）
+ * 依次尝试、每个只试一次，成功即返回，全部失败才抛聚合错误。单源写入/清理由 fetchIntoCache 负责（失败会删
+ * 缓存条目），故换源不残留半截缓存。webUrls 为空时报明确错误（正常不可达——platforms 过滤已挡住 macOS 专属模型如 1.2B）。
  */
 async function downloadIntoCache(
   cache: Cache,
@@ -118,11 +121,20 @@ async function downloadIntoCache(
   file: LocalModelFile,
   onFileProgress: (received: number) => void,
 ): Promise<void> {
-  const url = file.webUrl;
-  if (!url) {
+  const urls = file.webUrls;
+  if (urls.length === 0) {
     throw new Error(`该模型无 web 端下载源: ${file.filename}`);
   }
-  await fetchIntoCache(cache, key, url, file, onFileProgress);
+  const errors: string[] = [];
+  for (const url of urls) {
+    try {
+      await fetchIntoCache(cache, key, url, file, onFileProgress);
+      return;
+    } catch (err) {
+      errors.push(`${url} → ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  throw new Error(`下载失败（全部源均不可用） ${file.filename}:\n${errors.join('\n')}`);
 }
 
 /**

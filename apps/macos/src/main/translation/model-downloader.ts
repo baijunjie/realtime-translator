@@ -42,7 +42,7 @@ export async function downloadTranslationModel(
     }, 0);
   for (const f of toDownload) {
     let last = 0;
-    await downloadFile(f.url, localPath(f), (loaded) => {
+    await downloadFile(f.nativeUrls, localPath(f), (loaded) => {
       last = loaded;
       // 实收字节可能略超近似分母（q8 实际略大于估值）：封顶到 total，避免进度条越界。
       onProgress({ loaded: Math.min(base + loaded, total), total });

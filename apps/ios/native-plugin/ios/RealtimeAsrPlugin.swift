@@ -748,7 +748,7 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
         continue
       }
       let baseCompleted = completedBytes
-      try downloadFile(from: file.url, to: dest) { loadedThisFile in
+      try downloadFile(from: file.urls, to: dest) { loadedThisFile in
         self.notifyListeners("setupProgress", data: [
           "loaded": baseCompleted + loadedThisFile,
           "total": totalBytes,
@@ -763,10 +763,33 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     notifyListeners("setupProgress", data: ["loaded": totalBytes, "total": totalBytes])
   }
 
-  /// Synchronous (on asrQueue) URLSession download to a temp file, then atomic move.
-  /// Follows GitHub/HF redirects automatically. `onBytes` reports bytes written so far.
-  private func downloadFile(from urlString: String, to dest: URL,
+  /// Download `dest` from an ordered list of sources, trying each once until one succeeds; throws an
+  /// aggregate error only if all fail. `urls` is the native-side ordered list (self-hosted GitHub
+  /// Release first, optional HF upstream fallback — see @rt/core AsrModelFile.nativeUrls). Each attempt
+  /// downloads to a temp file and atomically moves on success, so a failed source leaves nothing behind.
+  private func downloadFile(from urls: [String], to dest: URL,
                             onBytes: @escaping (Int) -> Void) throws {
+    guard !urls.isEmpty else {
+      throw asrError("no download source for \(dest.lastPathComponent)")
+    }
+    var errors: [String] = []
+    for urlString in urls {
+      do {
+        try downloadFromURL(urlString, to: dest, onBytes: onBytes)
+        return
+      } catch {
+        errors.append("\(urlString) → \(error.localizedDescription)")
+      }
+    }
+    // All sources exhausted: surface the aggregated per-source failures to the retry UI.
+    throw asrError("all download sources failed for \(dest.lastPathComponent):\n"
+                   + errors.joined(separator: "\n"))
+  }
+
+  /// Synchronous (on asrQueue) URLSession download from a single URL to a temp file, then atomic move.
+  /// Follows GitHub/HF redirects automatically. `onBytes` reports bytes written so far.
+  private func downloadFromURL(_ urlString: String, to dest: URL,
+                               onBytes: @escaping (Int) -> Void) throws {
     guard let url = URL(string: urlString) else {
       throw asrError("invalid model URL: \(urlString)")
     }

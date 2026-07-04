@@ -4,7 +4,9 @@ import {
   DEFAULT_TRANSLATION_MODEL_ID,
   LOCAL_TRANSLATION_MODELS,
   M2M100_SPEC,
+  availableTranslationModels,
   getTranslationModel,
+  localTranslationSupported,
   normalizeZh,
   planTranslation,
   translationModelsFor,
@@ -38,13 +40,13 @@ describe('本地翻译模型注册表', () => {
       expect(m.files.length).toBeGreaterThan(0);
       expect(m.approxDownloadBytes).toBeGreaterThan(0);
       for (const f of m.files) {
-        expect(f.url).toMatch(/^https:\/\//);
+        expect(f.nativeUrls[0]).toMatch(/^https:\/\//);
         expect(f.filename.length).toBeGreaterThan(0);
         // dir 为缓存布局子目录：'' 或形如 'onnx'（不含前后斜杠）
         expect(f.dir).not.toMatch(/^\/|\/$/);
-        // 主源为自托管 GitHub Release 资产，扁平命名以文件名结尾（落地文件名与之一致）。
-        expect(f.url).toContain('github.com/baijunjie/realtime-translator/releases/download/models-v1/');
-        expect(f.url.endsWith(f.filename)).toBe(true);
+        // native 主源为自托管 GitHub Release 资产，扁平命名以文件名结尾（落地文件名与之一致）。
+        expect(f.nativeUrls[0]).toContain('github.com/baijunjie/realtime-translator/releases/download/models-v1/');
+        expect(f.nativeUrls[0].endsWith(f.filename)).toBe(true);
       }
       // 离线加载所需的 seq2seq 双权重必须在 files 清单内（q8 档带 _quantized 后缀）。
       const names = m.files.map((f) => f.filename).join(' ');
@@ -65,25 +67,27 @@ describe('本地翻译模型注册表', () => {
         'onnx/decoder_model_merged_quantized.onnx',
       ]),
     );
-    // 按端分源：url 为自托管 GitHub Release 资产（扁平命名带 m2m100_418M- 前缀，macOS 用）；
-    // webUrl 为上游 Xenova/m2m100_418M 仓 main 分支 resolve 直链（含缓存布局子目录，web 用）。
+    // 按端分源：nativeUrls[0] 为自托管 GitHub Release 资产（扁平命名带 m2m100_418M- 前缀）；
+    // webUrls[0] 为上游 Xenova/m2m100_418M 仓 main 分支 resolve 直链（含缓存布局子目录，web 用）。
     for (const f of M2M100_SPEC.files) {
-      expect(f.url).toBe(
+      expect(f.nativeUrls[0]).toBe(
         `https://github.com/baijunjie/realtime-translator/releases/download/models-v1/m2m100_418M-${f.filename}`,
       );
       const rel = f.dir ? `${f.dir}/${f.filename}` : f.filename;
-      expect(f.webUrl).toBe(`https://huggingface.co/Xenova/m2m100_418M/resolve/main/${rel}`);
+      expect(f.webUrls[0]).toBe(`https://huggingface.co/Xenova/m2m100_418M/resolve/main/${rel}`);
+      // native 兜底段（自托管之后）与 web 上游同款。
+      expect(f.nativeUrls.slice(1)).toEqual(f.webUrls);
     }
   });
 
-  it('M2M100-1.2B 为自托管唯一源（仅 macOS）：url 带 m2m100_1.2B- 前缀，无 web 端 webUrl', () => {
+  it('M2M100-1.2B 为自托管唯一源（仅 macOS）：nativeUrls 仅带 m2m100_1.2B- 前缀资产，webUrls 为空', () => {
     const spec = LOCAL_TRANSLATION_MODELS.find((m) => m.id === 'm2m100-1.2b');
     expect(spec).toBeDefined();
     for (const f of spec!.files) {
-      expect(f.url).toBe(
+      expect(f.nativeUrls).toEqual([
         `https://github.com/baijunjie/realtime-translator/releases/download/models-v1/m2m100_1.2B-${f.filename}`,
-      );
-      expect(f.webUrl).toBeUndefined();
+      ]);
+      expect(f.webUrls).toEqual([]);
     }
   });
 
@@ -91,6 +95,33 @@ describe('本地翻译模型注册表', () => {
     expect(translationModelsFor('macos').map((m) => m.id)).toEqual(['m2m100', 'm2m100-1.2b']);
     expect(translationModelsFor('web').map((m) => m.id)).toEqual(['m2m100']);
     expect(translationModelsFor('ios')).toEqual([]);
+  });
+
+  it('两款 M2M100 均标记 memoryHeavy（内存受限端会排除）', () => {
+    expect(getTranslationModel('m2m100')?.memoryHeavy).toBe(true);
+    expect(getTranslationModel('m2m100-1.2b')?.memoryHeavy).toBe(true);
+  });
+});
+
+describe('内存门槛：availableTranslationModels / localTranslationSupported', () => {
+  it('宿主不受限（macos/native，memoryConstrained=false）：等同 translationModelsFor', () => {
+    expect(
+      availableTranslationModels('macos', { memoryConstrained: false }).map((m) => m.id),
+    ).toEqual(['m2m100', 'm2m100-1.2b']);
+    expect(
+      availableTranslationModels('web', { memoryConstrained: false }).map((m) => m.id),
+    ).toEqual(['m2m100']);
+    expect(localTranslationSupported('web', { memoryConstrained: false })).toBe(true);
+  });
+
+  it('宿主受限（iOS/iPadOS WebKit，memoryConstrained=true）：排除 memoryHeavy 的翻译模型', () => {
+    // web 上唯一本地翻译 m2m100 是 memoryHeavy → 受限端无可用本地翻译（回落云端）。
+    expect(availableTranslationModels('web', { memoryConstrained: true })).toEqual([]);
+    expect(localTranslationSupported('web', { memoryConstrained: true })).toBe(false);
+  });
+
+  it('门槛只作用于 memoryHeavy 模型，不误伤其它（此处两款均 heavy，受限端 macos 也清空——仅验逻辑）', () => {
+    expect(availableTranslationModels('macos', { memoryConstrained: true })).toEqual([]);
   });
 });
 

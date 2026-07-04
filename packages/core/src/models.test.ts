@@ -17,7 +17,7 @@ describe('ASR 模型注册表', () => {
     expect(m?.platforms).toEqual(expect.arrayContaining(['macos', 'web', 'ios']));
   });
 
-  it('每个模型 approxBytes 等于其文件字节之和', () => {
+  it('每个模型 approxBytes 等于其文件字节之和（ASR 每文件登记字节）', () => {
     for (const m of ASR_MODELS) {
       const sum = m.files.reduce((acc, f) => acc + f.approxBytes, 0);
       expect(m.approxBytes).toBe(sum);
@@ -59,23 +59,28 @@ describe('asrModelsFor', () => {
   });
 });
 
-describe('ASR 按端分源 URL（自托管 url + web 上游 webUrl）', () => {
+describe('ASR 按端分源 URL（native 自托管优先 + HF 兜底；web HF 上游）', () => {
   const GH_BASE = 'https://github.com/baijunjie/realtime-translator/releases/download/models-v1/';
 
-  it('公共依赖 VAD：url 为自托管无前缀资产；web 用同源静态资源覆盖，故不设 webUrl', () => {
-    expect(SILERO_VAD.url).toBe(`${GH_BASE}silero_vad.onnx`);
-    expect(SILERO_VAD.webUrl).toBeUndefined();
+  it('公共依赖 VAD：nativeUrls 为自托管无前缀资产；web 用同源静态资源覆盖，故 webUrls 为空', () => {
+    expect(SILERO_VAD.nativeUrls).toEqual([`${GH_BASE}silero_vad.onnx`]);
+    expect(SILERO_VAD.webUrls).toEqual([]);
   });
 
-  it('各模型文件：url 为自托管资产（modelId- 前缀 + 原文件名）；web 平台模型带上游 HF csukuangfj webUrl', () => {
+  it('各模型文件：nativeUrls[0] 为自托管资产（modelId- 前缀 + 原文件名），native 兜底 = web 上游；web 平台模型带上游 HF csukuangfj webUrls', () => {
     for (const m of ASR_MODELS) {
       for (const f of m.files) {
-        // url：github release，扁平命名 `<modelId>-<原文件名>`，以原文件名结尾。
-        expect(f.url).toBe(`${GH_BASE}${m.id}-${f.filename}`);
-        // 全部 ASR 模型 platforms 均含 web，故都带上游 webUrl（HF csukuangfj resolve 直链，以原文件名结尾）。
+        // native 首选自托管，扁平命名 `<modelId>-<原文件名>`。
+        expect(f.nativeUrls[0]).toBe(`${GH_BASE}${m.id}-${f.filename}`);
+        // 全部 ASR 模型 platforms 均含 web，故都带上游 webUrls（HF csukuangfj resolve 直链，以原文件名结尾）。
         expect(m.platforms).toContain('web');
-        expect(f.webUrl).toMatch(/^https:\/\/huggingface\.co\/csukuangfj\/.+\/resolve\/main\//);
-        expect(f.webUrl?.endsWith(f.filename)).toBe(true);
+        expect(f.webUrls.length).toBeGreaterThan(0);
+        for (const u of f.webUrls) {
+          expect(u).toMatch(/^https:\/\/[^/]+\/csukuangfj\/.+\/resolve\/main\//);
+          expect(u.endsWith(f.filename)).toBe(true);
+        }
+        // native 兜底段（自托管之后）与 web 上游同款。
+        expect(f.nativeUrls.slice(1)).toEqual(f.webUrls);
       }
     }
   });

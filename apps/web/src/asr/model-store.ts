@@ -39,12 +39,13 @@ const SAME_ORIGIN_BUNDLED: Record<string, string> = {
 };
 
 /**
- * 浏览器端某文件的 web 下载源（按端分源、单源无回退）：同源托管覆盖优先（VAD），
- * 否则用注册表的上游 web 源 file.webUrl。返回 undefined 表示无 web 端下载源
- * （正常不可达——platforms 过滤已挡住 macOS 专属模型，downloadIntoCache 会报明确错误）。
+ * 浏览器端某文件的 web 下载源有序列表（下载器按序 fallback、每个只试一次）：同源托管覆盖置于**首位**
+ * （VAD，最快且可离线），其后接注册表的上游 web 源 file.webUrls（HF 主源 + 镜像）。空列表表示无 web
+ * 端下载源（正常不可达——platforms 过滤已挡住 macOS 专属模型，downloadIntoCache 会报明确错误）。
  */
-function resolveUrl(file: AsrModelFile): string | undefined {
-  return SAME_ORIGIN_BUNDLED[file.filename] ?? file.webUrl;
+function resolveUrls(file: AsrModelFile): string[] {
+  const sameOrigin = SAME_ORIGIN_BUNDLED[file.filename];
+  return [...(sameOrigin ? [sameOrigin] : []), ...file.webUrls];
 }
 
 /** 聚合下载进度（与 @rt/core SetupProgress 同形）。 */
@@ -171,8 +172,9 @@ export function modelFileList(modelId: string): string[] {
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 下载单个文件并写入 Cache Storage：按端分源、单源无回退，只用 resolveUrl 给出的 web 源
- * （同源覆盖或上游 webUrl）。无 web 源时报明确错误（正常不可达，见 resolveUrl）。
+ * 下载单个文件并写入 Cache Storage：按 resolveUrls 给出的有序 web 源（同源覆盖 + 上游 + 镜像）依次尝试、
+ * 每个只试一次，成功即返回，全部失败才抛聚合错误。单源写入/清理由 fetchIntoCache 负责（失败会删缓存条目），
+ * 故换源不残留半截缓存。无 web 源时报明确错误（正常不可达，见 resolveUrls）。
  */
 async function downloadIntoCache(
   cache: Cache,
@@ -180,11 +182,20 @@ async function downloadIntoCache(
   file: AsrModelFile,
   onFileProgress: (loaded: number) => void,
 ): Promise<void> {
-  const url = resolveUrl(file);
-  if (!url) {
+  const urls = resolveUrls(file);
+  if (urls.length === 0) {
     throw new Error(`该模型无 web 端下载源: ${file.filename}`);
   }
-  await fetchIntoCache(cache, key, url, file, onFileProgress);
+  const errors: string[] = [];
+  for (const url of urls) {
+    try {
+      await fetchIntoCache(cache, key, url, file, onFileProgress);
+      return;
+    } catch (err) {
+      errors.push(`${url} → ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  throw new Error(`下载失败（全部源均不可用） ${file.filename}:\n${errors.join('\n')}`);
 }
 
 /**

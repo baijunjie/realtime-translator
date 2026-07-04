@@ -90,11 +90,14 @@ gh release view v<ver> --json assets -q '.assets[] | "\(.name)  \(.size)  \(.upd
    gh release upload models-v1 <files> --clobber
    ```
 
-2. **登记注册表**（`packages/core`：ASR 见 `models.ts`，翻译见 `translation/local-spec.ts`）：
-   - 每个文件填自托管 GitHub Release 直链 `url`（`ghModelAsset('<模型id>-<原文件名>')`）——**macOS / iOS** 走这个。
-   - `platforms` 含 `web` 的模型，另给每个文件填上游、发 CORS 头的 `webUrl`（如 HuggingFace resolve 直链）：GitHub Release 资产**不发 CORS 头**，浏览器 fetch 用不了，web 只能走 `webUrl`。macOS-only 模型（如 M2M100-1.2B）无需 `webUrl`。
+2. **登记注册表**（`packages/core`：统一清单在 `model-registry.ts`，下载源治理在 `model-sources.ts`；ASR 视图见 `models.ts`、翻译视图见 `translation/local-spec.ts`）：
+   - 在 `model-registry.ts` 的 `MODELS` 加一条模型条目（`kind: 'asr' | 'translation'`）。每个文件的下载源是**按端分源的有序列表**，由 `model-sources.ts` 的构造器生成，下载器按序 fallback（每个源只试一次）：
+     - `nativeUrls`（**macOS / iOS**）：`selfHostedAsset('<模型id>-<原文件名>')` 自托管直链**在首**，其后追加 `hfResolveUrls(<repo>, <rel>)` 上游做兜底（有上游者）。
+     - `webUrls`（`platforms` 含 `web` 的模型）：`hfResolveUrls(<repo>, <rel>)`（上游主源 + 镜像，发 CORS 头）。GitHub Release 资产**不发 CORS 头**，浏览器 fetch 用不了，故 web 只能走 `webUrls`；macOS-only 模型（如 M2M100-1.2B）`webUrls` 留空。
+   - 换镜像 / 换 owner / 换 release tag 只改 `model-sources.ts`（`SELF_HOSTED` / `HF` / `HF_MIRRORS`）一处；web 翻译缓存键主机 `TRANSFORMERS_REMOTE_HOST` 不可变、绝不跟镜像走（否则离线加载 miss）。
+   - iOS 的 `AsrModels.swift` 是从注册表**生成**的提交物：改完注册表须重跑 `pnpm --filter @rt/ios gen:models` 并提交（CI 有 `--check` 兜底）。
 
-3. **核验 URL**：对注册表里全部 URL 做 HEAD 核验，确认最终都 200（GitHub Release 会 302 到 CDN，`-L` 跟随后应为 200）：
+3. **核验 URL**：对注册表里各文件下载源列表（`nativeUrls` / `webUrls`）内的每个 URL 做 HEAD 核验，确认最终都 200（GitHub Release 会 302 到 CDN，`-L` 跟随后应为 200）：
 
    ```bash
    curl -sIL <url> | grep -E '^HTTP'   # 期望最后一行 200

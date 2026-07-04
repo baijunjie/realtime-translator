@@ -54,6 +54,11 @@ jobs:
       - name: Type-check (@rt/ios)
         run: pnpm --filter @rt/ios type-check
 
+      # iOS 的 AsrModels.swift 是从 @rt/core 注册表生成的提交物；校验其与当前注册表一致，
+      # 防止改了 packages/core 却忘记重跑 `pnpm --filter @rt/ios gen:models` 导致漂移。
+      - name: Check generated Swift models up-to-date (@rt/ios)
+        run: pnpm --filter @rt/ios gen:models --check
+
   # 探测本次改动是否影响 web 产物：只在 main push 时计算（手动触发一律部署，
   # 故该场景跳过探测、输出回退为 true）。改动仅涉及 macOS/iOS/docs 时 web=false，
   # 下游 deploy-web 直接跳过，省一次 Pages 部署并缩小其后端竞态的暴露面。

@@ -20,11 +20,34 @@ export function asrModelsReady(modelsDir: string, modelId: string): boolean {
 const STALL_TIMEOUT_MS = 30_000;
 
 /**
- * 从单一 URL 流式下载到 dest（先写 .part 再原子 rename），带无进展看门狗。
- * 按端分源、单源无回退：macOS 只用自托管 GitHub Release 源（注册表 file.url）。
- * ASR 与翻译模型的自研下载链路共用此函数（翻译模型见 ./translation/model-downloader）。
+ * 从多个下载源按序尝试下载到 dest：每个 URL 只试一次，成功即返回，全部失败才抛出聚合错误。
+ * urls 为按端分源的有序列表（macOS native 端取注册表 file.nativeUrls：自托管 GitHub Release 优先、
+ * 可含 HF 上游兜底）。ASR 与翻译模型的自研下载链路共用此函数（翻译模型见 ./translation/model-downloader）。
+ * 每次失败前会清理本次 .part（见 downloadFromUrl），故换源不残留半截文件；停滞/HTTP 错误均计为该源失败。
  */
 export async function downloadFile(
+  urls: string[],
+  dest: string,
+  onBytes?: (loaded: number, total: number) => void
+): Promise<void> {
+  if (urls.length === 0) throw new Error(`无可用下载源: ${dest}`);
+  const errors: string[] = [];
+  for (const url of urls) {
+    try {
+      await downloadFromUrl(url, dest, onBytes);
+      return;
+    } catch (err) {
+      errors.push(`${url} → ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // 全部源耗尽：把各源失败原因聚合抛出（含停滞/HTTP 等），交给上层失败→重试 UI 接管。
+  throw new Error(`全部下载源均失败:\n${errors.join('\n')}`);
+}
+
+/**
+ * 从单一 URL 流式下载到 dest（先写 .part 再原子 rename），带无进展看门狗。失败/中断时清理本次 .part。
+ */
+async function downloadFromUrl(
   url: string,
   dest: string,
   onBytes?: (loaded: number, total: number) => void
@@ -107,7 +130,7 @@ export async function downloadAsrModels(
   let base = 0; // 已完成文件的累计实收字节
   for (const f of toDownload) {
     let last = 0;
-    await downloadFile(f.url, localPath(f), (loaded) => {
+    await downloadFile(f.nativeUrls, localPath(f), (loaded) => {
       last = loaded;
       onProgress({ loaded: base + loaded, total });
     });

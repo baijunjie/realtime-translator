@@ -71,7 +71,7 @@ The packaged app is currently **unsigned** — to open it, right-click → Open 
 Live at **https://baijunjie.github.io/realtime-translator/** — installable, and works offline after the first load (models and app shell are cached).
 
 - ASR runs sherpa-onnx as **single-threaded WebAssembly** in a Web Worker — no COOP/COEP headers needed, so it can be hosted for free on GitHub Pages.
-- Models are fetched from an upstream CDN on first use: because GitHub Release assets send no CORS headers, the browser pulls recognition and translation models from upstream HuggingFace (Silero VAD is still bundled same-origin), then caches them in Cache Storage; settings/archives live in IndexedDB.
+- Models are fetched on demand: because GitHub Release assets send no CORS headers, the browser pulls recognition and translation models from upstream HuggingFace (optionally mirrored; Silero VAD is still bundled same-origin), then caches them in Cache Storage; settings/archives live in IndexedDB.
 - Deployed by a GitHub Actions workflow (`.github/workflows/ci.yml`, the `deploy-web` job) on every push to `main`, but only after the quality gate (`check`) passes — bad code can't reach production.
 
 ```bash
@@ -92,16 +92,16 @@ npm run test-translate              # multi-direction translation (downloads mod
 
 Recognition defaults to SenseVoice (multilingual, available everywhere), with three single-language models — Paraformer / ReazonSpeech / Parakeet — as alternatives; local translation runs M2M-100 on macOS (a larger 1.2B variant is also selectable), M2M-100 on web, and Apple's on-device translation on iOS. Every model is fetched on demand from the `@rt/core` registry; only the runtime differs (native N-API on macOS, the iOS xcframework, single-threaded WASM on web).
 
-Download source is per-platform: **macOS / iOS** pull every model from this repo's GitHub Release (the self-hosted `models-v1` assets); **web** pulls from upstream HuggingFace instead, because GitHub Release assets send no CORS headers (Silero VAD stays bundled same-origin on web).
+Download source is per-platform with ordered fallback: **macOS / iOS** prioritize this repo's GitHub Release (the self-hosted `models-v1` assets), then automatically fall back to upstream HuggingFace on failure; **web** uses upstream HuggingFace (optionally mirrored) as primary source, because GitHub Release assets send no CORS headers (Silero VAD stays bundled same-origin on web). Each source is tried once, and failure occurs only when all sources exhausted.
 
 | Model | Purpose | Platforms | Size | How |
 |---|---|---|---|---|
 | Silero VAD | voice-activity detection (shared by every recognition model) | all | ~0.6MB | GitHub Release on macOS / iOS; bundled same-origin on web |
-| SenseVoice (int8) | multilingual recognition (default) | macOS / iOS / web | ~230MB | GitHub Release on macOS / iOS; HuggingFace on web |
-| Paraformer-zh (int8) | Chinese recognition | macOS / web | ~220MB | per-platform, as above |
-| ReazonSpeech-ja | Japanese recognition | macOS / web | ~160MB | as above |
-| Parakeet-en (int8) | English recognition | macOS / web | ~630MB | as above |
-| M2M100-418M (q8) | multilingual translation (default) | macOS / web | ~640MB | as above |
+| SenseVoice (int8) | multilingual recognition (default) | macOS / iOS / web | ~230MB | GitHub Release (+ HuggingFace fallback) on macOS / iOS; HuggingFace on web |
+| Paraformer-zh (int8) | Chinese recognition | macOS / web | ~220MB | GitHub Release (+ HuggingFace fallback) on macOS; HuggingFace on web |
+| ReazonSpeech-ja | Japanese recognition | macOS / web | ~160MB | GitHub Release (+ HuggingFace fallback) on macOS; HuggingFace on web |
+| Parakeet-en (int8) | English recognition | macOS / web | ~630MB | GitHub Release (+ HuggingFace fallback) on macOS; HuggingFace on web |
+| M2M100-418M (q8) | multilingual translation (default) | macOS / web | ~640MB | GitHub Release (+ HuggingFace fallback) on macOS; HuggingFace on web |
 | M2M100-1.2B (q8) | multilingual translation (higher quality) | macOS | ~1.5GB | GitHub Release (self-converted and self-hosted; no upstream mirror) |
 
 iOS does **not** download a translation model — it uses Apple's on-device translation instead. Chinese output is normalized to Simplified (neither M2M100 nor Apple distinguishes Simplified/Traditional scripts).

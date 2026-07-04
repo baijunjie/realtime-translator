@@ -1,8 +1,11 @@
-// 本地翻译模型的平台无关数据：模型规格（LocalModelSpec）、M2M100 规格与语言码映射，
-// 以及中文简体归一化（normalizeZh，基于 chinese-conv）。
-// 具体跑模型的 LocalTranslator 实现（依赖 onnxruntime-node）留在各端。
+// 本地翻译模型的平台无关视图：从统一注册表 ../model-registry 的 MODELS 过滤 kind==='translation' 派生。
+// 保持既有导出形状（LOCAL_TRANSLATION_MODELS / M2M100_SPEC / helpers / planTranslation），各端消费不变。
+//
+// 本模块是**唯一**把注册表里纯数据的字形后处理标签（LangEntrySpec.script='zh-hans'）挂回具体函数
+// （normalizeZh，依赖 chinese-conv）的地方——注册表本身保持纯数据，避免 chinese-conv 被拖进以 ../models
+// 为入口的 iOS esbuild 子图（见 ../model-registry 顶部说明）。具体跑模型的 LocalTranslator 留在各端。
 import { sify } from 'chinese-conv';
-import { ghModelAsset } from '../model-assets';
+import { MODELS, type LangEntrySpec, type ModelFileSpec, type TranslationModelEntry } from '../model-registry';
 import type { LocalEngine, Platform } from '../types';
 
 /** 中文简体归一化：模型输出偶带繁体字形，统一转简体（成本极低，值得保留）。 */
@@ -10,7 +13,7 @@ export function normalizeZh(text: string): string {
   return sify(text);
 }
 
-/** 某个 app 语言在该模型下如何处理：用哪个模型语言码 + 目标产出的脚本后处理 */
+/** 某个 app 语言在该模型下如何处理：用哪个模型语言码 + 目标产出的脚本后处理（视图，含函数）。 */
 export interface LangEntry {
   /** 模型自己的语言码（M2M100: zh/en…；NLLB: zho_Hans/eng_Latn…） */
   code: string;
@@ -29,26 +32,10 @@ export interface LangEntry {
 
 /**
  * 本地翻译模型的单个待下载文件（自研下载链路：按 URL 下载，落入 Transformers.js 的缓存布局后
- * 以 allowRemoteModels=false 离线加载）。与 ASR 的 AsrModelFile 同理——注册表声明 URL，各端自行下载。
+ * 以 allowRemoteModels=false 离线加载）。与 ASR 共用同一份文件描述——按端分源的有序 URL 列表
+ * （nativeUrls / webUrls，见 ../model-sources），下载器按序 fallback。
  */
-export interface LocalModelFile {
-  /** 下载源（自托管 GitHub Release 扁平直链，与缓存键解耦）：macOS 用。 */
-  url: string;
-  /**
-   * web 端专用下载源（上游 HF resolve 直链）：浏览器 fetch 受 CORS 约束，而自托管 GitHub
-   * Release 资产不发 CORS 头，故 web 改走发 CORS 头的上游源。仅 platforms 含 web 的模型需要；
-   * macOS 专属模型（如 1.2B）不设。
-   */
-  webUrl?: string;
-  /** 落地文件名（如 encoder_model_quantized.onnx）。 */
-  filename: string;
-  /**
-   * Transformers.js 缓存布局内、相对 `<cacheDir>/<modelId>/` 的子目录（'' 或 'onnx'）。
-   * macOS 据此拼本地路径 `<cacheDir>/<modelId>/<dir>/<filename>`；Web 据此构造 Transformers.js
-   * 将要请求的缓存键（HF resolve URL），从而与下载源 URL 解耦。
-   */
-  dir: string;
-}
+export type LocalModelFile = ModelFileSpec;
 
 export interface LocalModelSpec {
   id: LocalEngine;
@@ -74,91 +61,55 @@ export interface LocalModelSpec {
   fallbackLang: string;
   /** 支持该模型的平台（如 iOS 走系统翻译、不消费本地权重，故不列入）。 */
   platforms: Platform[];
+  /** true=内存占用大：内存受限运行环境（iOS/iPadOS WebKit）会排除之，见 availableTranslationModels。 */
+  memoryHeavy?: boolean;
 }
 
-// M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
-const M2M100_REPO = 'Xenova/m2m100_418M';
-/**
- * 构造 M2M100-418M 的一个待下载文件：url 为自托管 GitHub Release 资产（扁平命名
- * `m2m100_418M-<原文件名>`，与 1.2B 前缀风格一致，macOS 用）；webUrl 为上游 Xenova HF
- * resolve 直链（web 用，发 CORS 头）。dir 仅为缓存布局子目录（'' 或 'onnx'），与下载源 URL 解耦。
- */
-function m2m100File(dir: string, filename: string): LocalModelFile {
-  const rel = dir ? `${dir}/${filename}` : filename;
-  return {
-    url: ghModelAsset(`m2m100_418M-${filename}`),
-    webUrl: `https://huggingface.co/${M2M100_REPO}/resolve/main/${rel}`,
-    filename,
-    dir,
-  };
+/** 把注册表纯数据的语言项挂回视图（script 标签 → 具体后处理函数）。 */
+function reifyLangEntry(v: LangEntrySpec): LangEntry {
+  const entry: LangEntry = { code: v.code };
+  if (v.lang !== undefined) entry.lang = v.lang;
+  if (v.script === 'zh-hans') entry.toScript = normalizeZh;
+  return entry;
 }
 
-// M2M100 系（418M / 1.2B）共用同一分词器与语言码映射。
-const M2M100_LANGS: Record<string, LangEntry> = {
-  // 中文母语：产出/原文一律归一化为简体（模型输出偶带繁体字形）。
-  zh: { code: 'zh', lang: 'zh', toScript: normalizeZh },
-  en: { code: 'en' },
-  ja: { code: 'ja' },
-  ko: { code: 'ko' },
-  // yue（粤语）虽被 M2M100 归到 'zh' 码，但与中文是不同语言（lang 回退到键 'yue'）：
-  // 云端可真正翻译粤→中；本地模型做不到时由翻译器内部回退到字形转换。
-  yue: { code: 'zh' },
-};
-
-export const M2M100_SPEC: LocalModelSpec = {
-  id: 'm2m100',
-  nameKey: 'models.m2m100',
-  modelId: M2M100_REPO,
-  dtype: 'q8',
-  // 文件清单以本机真实缓存为准枚举（Transformers.js q8 档实际拉取的完整集合）：4 个 tokenizer/config
-  // 小文件 + onnx/ 下的量化 encoder/decoder。按体积升序排列（小文件先下，早暴露连接问题）。
-  files: [
-    m2m100File('', 'config.json'),
-    m2m100File('', 'generation_config.json'),
-    m2m100File('', 'tokenizer_config.json'),
-    m2m100File('', 'tokenizer.json'),
-    m2m100File('onnx', 'encoder_model_quantized.onnx'),
-    m2m100File('onnx', 'decoder_model_merged_quantized.onnx'),
-  ],
-  approxDownloadBytes: 640_000_000, // 上列文件合计约 640MB（q8 encoder ~288MB + decoder ~344MB + tokenizer 等）
-  fallbackLang: 'en',
-  langs: M2M100_LANGS,
-  platforms: ['macos', 'web'],
-};
-
-// M2M100-1.2B（MIT，质量档）。官方无 ONNX 发布，权重经 optimum 导出 + 合并 decoder + q8 量化后
-// 自托管于本仓库 GitHub Release（models-v1，资产名带 m2m100_1.2B- 前缀的扁平文件）；仅 macOS 支持、
-// 无上游镜像，故不设 webUrl（唯一源）。modelId 仅作 Transformers.js 缓存布局键，不对应 HuggingFace 仓库。
-function m2m1002bFile(dir: string, filename: string): LocalModelFile {
-  return { url: ghModelAsset(`m2m100_1.2B-${filename}`), filename, dir };
+function reifyLangs(langs: Record<string, LangEntrySpec>): Record<string, LangEntry> {
+  const out: Record<string, LangEntry> = {};
+  for (const [k, v] of Object.entries(langs)) out[k] = reifyLangEntry(v);
+  return out;
 }
-
-export const M2M100_1_2B_SPEC: LocalModelSpec = {
-  id: 'm2m100-1.2b',
-  nameKey: 'models.m2m100_1_2b',
-  modelId: 'realtime-translator/m2m100_1.2B',
-  dtype: 'q8',
-  files: [
-    m2m1002bFile('', 'config.json'),
-    m2m1002bFile('', 'generation_config.json'),
-    m2m1002bFile('', 'tokenizer_config.json'),
-    m2m1002bFile('', 'tokenizer.json'),
-    m2m1002bFile('onnx', 'encoder_model_quantized.onnx'),
-    m2m1002bFile('onnx', 'decoder_model_merged_quantized.onnx'),
-  ],
-  approxDownloadBytes: 1_531_751_193, // 上列文件精确合计（q8 encoder 642MB + decoder 881MB + tokenizer 等）
-  fallbackLang: 'en',
-  langs: M2M100_LANGS,
-  // 体积超出浏览器 WASM 内存的稳妥范围，web 暂不放开；iOS 走系统翻译不消费本地权重。
-  platforms: ['macos'],
-};
 
 /**
- * 可选用的本地翻译模型注册表（默认项在首）。
+ * 可选用的本地翻译模型注册表（从统一清单派生的视图，默认项在首）。
  * 入册硬门槛：非英语直连方向（本项目核心场景是 ja↔zh）实测可用。英语中心的
  * many-to-many 模型（如 mBART-50）ja→zh 接近零样本、会输出英语或幻觉，不满足门槛。
  */
-export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = [M2M100_SPEC, M2M100_1_2B_SPEC];
+export const LOCAL_TRANSLATION_MODELS: readonly LocalModelSpec[] = MODELS.filter(
+  (m): m is TranslationModelEntry => m.kind === 'translation',
+).map((m) => ({
+  id: m.id,
+  nameKey: m.nameKey,
+  modelId: m.modelId,
+  dtype: m.dtype,
+  files: m.files,
+  approxDownloadBytes: m.approxBytes,
+  langs: reifyLangs(m.langs),
+  fallbackLang: m.fallbackLang,
+  platforms: m.availability.platforms,
+  memoryHeavy: m.availability.memoryHeavy,
+}));
+
+/** 按 id 取本地翻译模型规格（缺失即注册表配置错误，早失败）。 */
+function requireModel(id: LocalEngine): LocalModelSpec {
+  const spec = LOCAL_TRANSLATION_MODELS.find((m) => m.id === id);
+  if (!spec) throw new Error(`翻译模型注册表缺少 ${id}`);
+  return spec;
+}
+
+// M2M100-418M（MIT，轻量，默认）。产出中文统一归一化为简体字形。
+export const M2M100_SPEC: LocalModelSpec = requireModel('m2m100');
+// M2M100-1.2B（MIT，质量档，仅 macOS，自托管唯一源）。
+export const M2M100_1_2B_SPEC: LocalModelSpec = requireModel('m2m100-1.2b');
 
 /** 默认本地翻译模型 id（轻量、全本地平台可用）。 */
 export const DEFAULT_TRANSLATION_MODEL_ID: LocalEngine = 'm2m100';
@@ -171,6 +122,29 @@ export function getTranslationModel(id: string): LocalModelSpec | undefined {
 /** 某平台上可用的本地翻译模型（platforms 含该平台）。 */
 export function translationModelsFor(platform: Platform): LocalModelSpec[] {
   return LOCAL_TRANSLATION_MODELS.filter((m) => m.platforms.includes(platform));
+}
+
+/**
+ * 某平台上**实际可用**的本地翻译模型：platforms 含该平台，且当宿主内存受限（memoryConstrained）时
+ * 排除吃内存的模型（memoryHeavy）。iOS/iPadOS WebKit（移动 Safari）传 memoryConstrained=true——本地翻译
+ * 大模型与 ASR 共存会 OOM，故这些端只走云端；macOS/native 传 false。宿主约束与模型属性分离、由此收口，
+ * 三处消费（模型列表过滤 / 本地翻译是否可用 / 引擎回落）共用同一判定，避免漂移。
+ */
+export function availableTranslationModels(
+  platform: Platform,
+  opts: { memoryConstrained: boolean },
+): LocalModelSpec[] {
+  return LOCAL_TRANSLATION_MODELS.filter(
+    (m) => m.platforms.includes(platform) && !(opts.memoryConstrained && m.memoryHeavy),
+  );
+}
+
+/** 某平台上是否支持本地（离线）翻译（在该端内存约束下至少有一个可用本地模型）。 */
+export function localTranslationSupported(
+  platform: Platform,
+  opts: { memoryConstrained: boolean },
+): boolean {
+  return availableTranslationModels(platform, opts).length > 0;
 }
 
 /**

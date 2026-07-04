@@ -71,7 +71,7 @@ pnpm dist:dir    # 展開済み .app のみ（高速、デバッグ用）
 公開先 **https://baijunjie.github.io/realtime-translator/**——インストール可能で、初回読み込み後はオフラインで動作します（モデルとアプリシェルをキャッシュ）。
 
 - ASR は **単一スレッドの WebAssembly** を Web Worker で実行（sherpa-onnx）——COOP/COEP ヘッダ不要なので GitHub Pages で無料ホスティングできます。
-- モデルは初回使用時に上流の CDN から取得します：GitHub Release 資産は CORS ヘッダを返さないため、ブラウザは認識モデルも翻訳モデルも上流の HuggingFace から取得（Silero VAD はアプリと同一オリジンに同梱のまま）し、Cache Storage にキャッシュ。設定/アーカイブは IndexedDB に保存。
+- モデルはオンデマンドで取得します：GitHub Release 資産は CORS ヘッダを返さないため、ブラウザは認識モデルも翻訳モデルも上流の HuggingFace（オプションのミラーも含む）から取得し、Silero VAD はアプリと同一オリジンに同梱のままで、Cache Storage にキャッシュ。設定/アーカイブは IndexedDB に保存。
 - GitHub Actions ワークフロー（`.github/workflows/ci.yml` の `deploy-web` job）が `main` への push ごとに、かつ品質ゲート（`check`）が全て通った後にのみデプロイします——不正なコードは本番に出せません。
 
 ```bash
@@ -92,16 +92,16 @@ npm run test-translate              # 多方向翻訳（初回はモデルをダ
 
 認識は既定で SenseVoice（多言語、全プラットフォームで利用可）を使い、単言語専用の Paraformer / ReazonSpeech / Parakeet も選べます。ローカル翻訳は macOS で M2M-100（より大きい 1.2B 版も選択可）、Web で M2M-100、iOS で Apple の端末上翻訳を使います。どのモデルもオンデマンドで `@rt/core` のレジストリから取得し、ランタイムだけが異なります（macOS はネイティブ N-API、iOS は xcframework、Web は単一スレッド WASM）。
 
-取得元はプラットフォームごとに分かれます：**macOS / iOS** は本リポジトリの GitHub Release（自己ホストの `models-v1` 資産）からすべてのモデルを取得；**Web** は GitHub Release 資産が CORS ヘッダを返さないため、上流の HuggingFace から取得します（Silero VAD は Web ではアプリと同一オリジンに同梱のまま）。
+取得元はプラットフォームごとに分かれ、順序付きフォールバックを備えています：**macOS / iOS** は本リポジトリの GitHub Release（自己ホストの `models-v1` 資産）を優先し、失敗時に自動的に上流の HuggingFace にフォールバック；**Web** は GitHub Release 資産が CORS ヘッダを返さないため、上流の HuggingFace（オプションのミラー含む）をメイン源として使用します（Silero VAD は Web ではアプリと同一オリジンに同梱のまま）。各ソースは 1 回だけ試され、全ソース失敗時のみ失敗と判定。
 
 | モデル | 用途 | プラットフォーム | サイズ | 取得 |
 |---|---|---|---|---|
 | Silero VAD | 音声区間検出（各認識モデル共通） | 全て | 約 0.6MB | macOS / iOS は GitHub Release；Web はアプリと同一オリジンで同梱 |
-| SenseVoice (int8) | 多言語認識（既定） | macOS / iOS / Web | 約 230MB | macOS / iOS：GitHub Release；Web：HuggingFace |
-| Paraformer-zh (int8) | 中国語認識 | macOS / Web | 約 220MB | 同上（プラットフォーム別） |
-| ReazonSpeech-ja | 日本語認識 | macOS / Web | 約 160MB | 同上 |
-| Parakeet-en (int8) | 英語認識 | macOS / Web | 約 630MB | 同上 |
-| M2M100-418M (q8) | 多言語翻訳（既定） | macOS / Web | 約 640MB | 同上 |
+| SenseVoice (int8) | 多言語認識（既定） | macOS / iOS / Web | 約 230MB | macOS / iOS：GitHub Release（+ HuggingFace フォールバック）；Web：HuggingFace |
+| Paraformer-zh (int8) | 中国語認識 | macOS / Web | 約 220MB | macOS：GitHub Release（+ HuggingFace フォールバック）；Web：HuggingFace |
+| ReazonSpeech-ja | 日本語認識 | macOS / Web | 約 160MB | macOS：GitHub Release（+ HuggingFace フォールバック）；Web：HuggingFace |
+| Parakeet-en (int8) | 英語認識 | macOS / Web | 約 630MB | macOS：GitHub Release（+ HuggingFace フォールバック）；Web：HuggingFace |
+| M2M100-418M (q8) | 多言語翻訳（既定） | macOS / Web | 約 640MB | macOS：GitHub Release（+ HuggingFace フォールバック）；Web：HuggingFace |
 | M2M100-1.2B (q8) | 多言語翻訳（高品質） | macOS | 約 1.5GB | GitHub Release（自前で変換・自己ホスト、上流ミラーなし） |
 
 iOS は翻訳モデルを**ダウンロードせず**、Apple の端末上翻訳を使います。中国語の訳文は簡体字に統一します（M2M100 / Apple とも簡体/繁体の字形を区別しません）。

@@ -25,7 +25,8 @@ import {
   listSummaries,
   makeArchiveId,
   CloudTranslator,
-  translationModelsFor,
+  availableTranslationModels,
+  localTranslationSupported,
   DEFAULT_TRANSLATION_MODEL_ID,
   getTranslationModel,
   translateFinalizedSegment,
@@ -80,7 +81,9 @@ const SETTINGS_KEY = 'settings';
 // ORT-web 里也跑不起来），故这些设备不提供本地翻译、引擎恒为云端。所有产出 settings 的
 // 路径（读/写）统一经此收口，保证 getSettings 与翻译热路径看到的引擎一致，且不会去建本地模型。
 function applyPlatformConstraints(s: AppSettings): AppSettings {
-  if (isIOS()) s.translation.engine = 'cloud';
+  // 内存受限运行环境（iOS/iPadOS WebKit 单标签页）：本地翻译大模型与 ASR 共存会 OOM，
+  // 故本地翻译按内存门槛排除（见 @rt/core availableTranslationModels）。
+  const memoryConstrained = isIOS();
   // web 不支持系统音频（getDisplayMedia 无法可靠采到系统声音），音源恒收敛为麦克风。
   s.audioSource = 'mic';
   // 识别模型若在 web 平台不可用（注册表 platforms 不含 web，或 id 未知），回落默认模型
@@ -89,11 +92,16 @@ function applyPlatformConstraints(s: AppSettings): AppSettings {
   if (!spec || !spec.platforms.includes('web')) {
     s.asr.model = DEFAULT_ASR_MODEL_ID;
   }
-  // 本地翻译引擎若在 web 不可用（platforms 不含 web 或 id 未知），回落默认本地模型。
+  // 本地翻译引擎：仅当在本端「实际可用」（含内存门槛）时保留；否则若默认本地模型仍可用则回落它，
+  // 否则回落云端。iOS/iPadOS WebKit 上全部本地翻译因 memoryHeavy 被排除 → 恒回落 cloud
+  // （回落前先判默认模型是否可用，避免把被排除的默认模型又选回、与门槛互相打架）。
   if (s.translation.engine !== 'cloud') {
-    const trSpec = getTranslationModel(s.translation.engine);
-    if (!trSpec || !trSpec.platforms.includes('web')) {
-      s.translation.engine = DEFAULT_TRANSLATION_MODEL_ID;
+    const available = availableTranslationModels('web', { memoryConstrained });
+    const stillOk = available.some((m) => m.id === s.translation.engine);
+    if (!stillOk) {
+      s.translation.engine = available.some((m) => m.id === DEFAULT_TRANSLATION_MODEL_ID)
+        ? DEFAULT_TRANSLATION_MODEL_ID
+        : 'cloud';
     }
   }
   return s;
@@ -288,7 +296,7 @@ export function createWebBridge(): AppBridge {
     // iOS/iPadOS 上本地翻译模型装不下 WebKit 内存 → 只提供云端翻译（UI 据此隐藏本地引擎选项）。
     // 构建期注入的发布版本串；define 缺失的环境（如单测导入）下不暴露
     appVersion: typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : undefined,
-    localTranslationAvailable: !isIOS(),
+    localTranslationAvailable: localTranslationSupported('web', { memoryConstrained: isIOS() }),
 
     // ===== ASR 管线 =====
     async startPipeline(): Promise<StartResult> {
@@ -393,21 +401,22 @@ export function createWebBridge(): AppBridge {
         }),
       );
       // 翻译（M2M100 系，Transformers.js Cache API 缓存）。同理已缓存时用规格近似字节。
-      // iOS/iPadOS 上本地翻译不可用（引擎恒为云端，见 applyPlatformConstraints），不列该组。
-      const trEntries = isIOS()
-        ? Promise.resolve([] as ModelInfo[])
-        : Promise.all(
-            translationModelsFor('web').map(async (spec): Promise<ModelInfo> => {
-              const downloaded = await isTranslationModelCached(spec);
-              return {
-                kind: 'translation',
-                id: spec.id,
-                sizeBytes: downloaded ? spec.approxDownloadBytes : 0,
-                downloaded,
-                inUse: s.translation.engine === spec.id,
-              };
-            }),
-          );
+      // 按内存门槛过滤：iOS/iPadOS WebKit 上本地翻译大模型被排除（引擎恒为云端，见 applyPlatformConstraints），
+      // availableTranslationModels 在受限端返回空 → 不列该组。
+      const trEntries = Promise.all(
+        availableTranslationModels('web', { memoryConstrained: isIOS() }).map(
+          async (spec): Promise<ModelInfo> => {
+            const downloaded = await isTranslationModelCached(spec);
+            return {
+              kind: 'translation',
+              id: spec.id,
+              sizeBytes: downloaded ? spec.approxDownloadBytes : 0,
+              downloaded,
+              inUse: s.translation.engine === spec.id,
+            };
+          },
+        ),
+      );
       const [asrList, trList] = await Promise.all([asrEntries, trEntries]);
       return [...asrList, ...trList];
     },

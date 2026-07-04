@@ -71,7 +71,7 @@ pnpm dist:dir    # 仅生成未压缩 .app（更快，调试用）
 线上地址 **https://baijunjie.github.io/realtime-translator/** ——可安装，首次加载后离线可用（模型与应用外壳都会缓存）。
 
 - ASR 用**单线程 WebAssembly** 在 Web Worker 里跑 sherpa-onnx——无需 COOP/COEP 头，因此能免费托管在 GitHub Pages。
-- 模型首次使用时从上游 CDN 拉取：网页因 GitHub Release 资产不发 CORS 头，识别与翻译模型都从上游 HuggingFace 下载（Silero VAD 仍随应用同源分发），下载后缓存进 Cache Storage；设置 / 归档存在 IndexedDB。
+- 模型按需下载：网页因 GitHub Release 资产不发 CORS 头，识别与翻译模型都从上游 HuggingFace（可选镜像）下载，Silero VAD 仍随应用同源分发，下载后缓存进 Cache Storage；设置 / 归档存在 IndexedDB。
 - 由 GitHub Actions 工作流（`.github/workflows/ci.yml` 的 `deploy-web` job）在每次推送到 `main` 且质量门禁（`check`）全绿后部署——坏代码进不了线上。
 
 ```bash
@@ -92,16 +92,16 @@ npm run test-translate              # 多向翻译（首次会下载模型）
 
 识别默认用 SenseVoice（多语言，全平台可用），另有 Paraformer / ReazonSpeech / Parakeet 三个单语专用模型；本地翻译在 macOS 用 M2M-100（另可选更大的 1.2B 版），网页用 M2M-100，iOS 用 Apple 端上翻译。所有模型都在按需下载时按 `@rt/core` 注册表获取，运行时各不相同（macOS 原生 N-API、iOS xcframework、网页单线程 WASM）。
 
-获取来源按端分：**macOS / iOS** 从本仓库的 GitHub Release（`models-v1` 资产，自托管）下载全部模型；**网页**因 GitHub Release 资产不发 CORS 头，改从上游 HuggingFace 下载（Silero VAD 在网页维持随应用同源分发）。
+获取来源按端分 + 有序兜底：**macOS / iOS** 优先自托管 GitHub Release（`models-v1` 资产），失败自动回退上游 HuggingFace；**网页**因 GitHub Release 资产不发 CORS 头，用上游 HuggingFace（可选镜像）为主源，Silero VAD 在网页维持随应用同源分发。每个源只试一次，全部失败才判失败。
 
 | 模型 | 用途 | 平台 | 大小 | 获取 |
 |---|---|---|---|---|
 | Silero VAD | 语音端点检测（各识别模型共用） | 全平台 | 约 0.6MB | macOS / iOS 从 GitHub Release 下载；网页随应用同源分发 |
-| SenseVoice (int8) | 多语言识别（默认） | macOS / iOS / 网页 | 约 230MB | macOS / iOS：GitHub Release；网页：HuggingFace |
-| Paraformer-zh (int8) | 中文识别 | macOS / 网页 | 约 220MB | 同上（按端分源） |
-| ReazonSpeech-ja | 日语识别 | macOS / 网页 | 约 160MB | 同上 |
-| Parakeet-en (int8) | 英语识别 | macOS / 网页 | 约 630MB | 同上 |
-| M2M100-418M (q8) | 多语言翻译（默认） | macOS / 网页 | 约 640MB | 同上 |
+| SenseVoice (int8) | 多语言识别（默认） | macOS / iOS / 网页 | 约 230MB | macOS / iOS：GitHub Release（+ HuggingFace 兜底）；网页：HuggingFace |
+| Paraformer-zh (int8) | 中文识别 | macOS / 网页 | 约 220MB | macOS：GitHub Release（+ HuggingFace 兜底）；网页：HuggingFace |
+| ReazonSpeech-ja | 日语识别 | macOS / 网页 | 约 160MB | macOS：GitHub Release（+ HuggingFace 兜底）；网页：HuggingFace |
+| Parakeet-en (int8) | 英语识别 | macOS / 网页 | 约 630MB | macOS：GitHub Release（+ HuggingFace 兜底）；网页：HuggingFace |
+| M2M100-418M (q8) | 多语言翻译（默认） | macOS / 网页 | 约 640MB | macOS：GitHub Release（+ HuggingFace 兜底）；网页：HuggingFace |
 | M2M100-1.2B (q8) | 多语言翻译（更高质量） | macOS | 约 1.5GB | GitHub Release（自行转换并自托管，无上游镜像） |
 
 iOS **不**下载翻译模型，改用 Apple 的端上翻译。中文译文统一做简体归一化（M2M100 / Apple 都不区分简繁字形）。

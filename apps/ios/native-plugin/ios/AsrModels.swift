@@ -11,8 +11,9 @@ import Foundation
 
 /// 单个需下载的 ASR 模型文件（对应 @rt/core 的 AsrModelFile）。
 struct AsrModelFile {
-  /// 下载地址（自托管 GitHub Release 资产；URLSession 自动跟随重定向）。
-  let url: String
+  /// 下载源有序列表（native：自托管 GitHub Release 优先 + HF 上游兜底）。下载器按序尝试、每个只试一次，
+  /// 全部失败才判失败；URLSession 自动跟随重定向。
+  let urls: [String]
   /// 落地文件名。
   let filename: String
   /// 目标子目录（相对 models 根目录）。空串表示直接放在 models 根目录下。
@@ -42,7 +43,7 @@ enum AsrModels {
   static let defaultModelId = "sense-voice"
 
   /// Silero VAD：所有 ASR 模型共用的语音端点检测依赖，不进模型选择列表，随任一模型一并下载。
-  static let vad = AsrModelFile(url: "https://github.com/baijunjie/realtime-translator/releases/download/models-v1/silero_vad.onnx", filename: "silero_vad.onnx", dir: "", role: "", approxBytes: 643854)
+  static let vad = AsrModelFile(urls: ["https://github.com/baijunjie/realtime-translator/releases/download/models-v1/silero_vad.onnx"], filename: "silero_vad.onnx", dir: "", role: "", approxBytes: 643854)
 
   /// iOS 支持的全部 ASR 模型规格（platforms 含 'ios'）。
   static let models: [AsrModelSpec] = [
@@ -51,8 +52,8 @@ enum AsrModels {
       dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
       engine: "senseVoice",
       files: [
-        AsrModelFile(url: "https://github.com/baijunjie/realtime-translator/releases/download/models-v1/sense-voice-model.int8.onnx", filename: "model.int8.onnx", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", role: "model", approxBytes: 239233841),
-        AsrModelFile(url: "https://github.com/baijunjie/realtime-translator/releases/download/models-v1/sense-voice-tokens.txt", filename: "tokens.txt", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", role: "tokens", approxBytes: 315894),
+        AsrModelFile(urls: ["https://github.com/baijunjie/realtime-translator/releases/download/models-v1/sense-voice-model.int8.onnx", "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx"], filename: "model.int8.onnx", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", role: "model", approxBytes: 239233841),
+        AsrModelFile(urls: ["https://github.com/baijunjie/realtime-translator/releases/download/models-v1/sense-voice-tokens.txt", "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt"], filename: "tokens.txt", dir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17", role: "tokens", approxBytes: 315894),
       ],
       approxBytes: 239549735
     ),
