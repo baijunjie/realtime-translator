@@ -8,6 +8,12 @@ import type { ToTranslateWorker, FromTranslateWorker } from './translate-worker-
 
 // 离线加载：模型由自研下载链路（downloadTranslationModel）预先写入 Transformers.js 的 Cache API
 // 缓存（键为 HF resolve URL）。装载时不联网——未缓存则 pipeline() 直接报错，交由上层引导先下载。
+//
+// allowLocalModels 必须显式置 true：浏览器/Worker 环境下其默认值为 false，而 hub.js 在查缓存
+// **之前**就校验「local 与 remote 不能同时禁用」，两者皆 false 会直接抛错、缓存永远不会被命中。
+// 置 true 后装载顺序为：Cache API（按 HF resolve URL 键，命中即离线完成）→ 本地路径
+// env.localModelPath（本应用无此目录，404）→ 远端（已禁用，报「未在本地找到」）——仍然不联网。
+env.allowLocalModels = true;
 env.allowRemoteModels = false;
 
 type TranslationFn = (
