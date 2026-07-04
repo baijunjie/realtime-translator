@@ -209,3 +209,51 @@ describe('cleanAsrText', () => {
     expect(cleanAsrText('😀😀😀😀😀')).toBe('😀😀');
   });
 });
+
+describe('定稿抢救（定稿解码无实文时用最近 partial 顶替）', () => {
+  it('长段定稿为空：用最近一次有实文的 partial 抢救，不丢段', () => {
+    const h = makeHarness();
+    // 说话 3s：期间 partial 正常出实文
+    h.engine.result = { text: '这是前半句', lang: '<|zh|>' };
+    h.feed(3, true);
+    // 静音断句前把引擎切到「定稿解码为空」：模拟整段重解码偶发失败
+    h.engine.result = { text: '', lang: '' };
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('这是前半句');
+    expect(h.segments[0].lang).toBe('zh');
+  });
+
+  it('长段定稿为纯标点：同样走抢救', () => {
+    const h = makeHarness();
+    h.engine.result = { text: '前半句内容', lang: '<|ja|>' };
+    h.feed(3, true);
+    h.engine.result = { text: '。', lang: '<|ja|>' };
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('前半句内容');
+  });
+
+  it('短段（低于抢救阈值）定稿为空：维持丢弃（短噪音过滤语义不变）', () => {
+    const h = makeHarness();
+    h.engine.result = { text: '嗯', lang: '<|zh|>' };
+    h.feed(1, true);
+    h.engine.result = { text: '。', lang: '<|zh|>' };
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(0);
+  });
+
+  it('抢救文本不跨段复用：上一段的 partial 不会救下一段', () => {
+    const h = makeHarness();
+    // 第一段正常定稿（消费掉 lastPartial）
+    h.engine.result = { text: '第一段', lang: '<|zh|>' };
+    h.feed(3, true);
+    h.feed(0.5, false);
+    // 第二段：partial 与定稿都无实文 → 丢弃，且不得借用第一段的文本
+    h.engine.result = { text: '', lang: '' };
+    h.feed(3, true);
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('第一段');
+  });
+});

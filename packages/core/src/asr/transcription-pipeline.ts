@@ -36,6 +36,10 @@ const PARTIAL_LOOKBACK_SECONDS = 0.6;
 // 否则单次解码会超过实时、拖垮宿主线程，导致 VAD 段迟迟无法闭合（不出定稿、不翻译）
 const PARTIAL_MAX_WINDOW_SECONDS = 8;
 
+// 定稿抢救的最短段长：段长达到该值仍解码不出实文时，用最近一次 partial 文本抢救定稿
+// （见 finalizeSegment）；更短的段按噪音丢弃。
+const SALVAGE_MIN_SECONDS = 2;
+
 // 连续重复达到这个次数才视为退化（复读机幻觉），折叠
 const REPEAT_MIN = 4;
 // 折叠后保留的份数（保留少量，既不刷屏又能看出原文带重复）
@@ -152,6 +156,8 @@ export class TranscriptionPipeline {
   private speechEnd = 0; // 最近一次检测到语音的采样位置（用于静音去抖与段尾）
   private partialFloor = 0; // 已最终确定的音频边界，部分识别不回看到此之前
   private lastPartialAt = 0; // 上次做部分识别时的 totalSamples
+  // 最近一次有实文的 partial 结果：定稿解码无实文时用于抢救长段（见 finalizeSegment）
+  private lastPartial: { text: string; lang: string } | null = null;
   private partialGap = Math.round(PARTIAL_INTERVAL_SECONDS * SAMPLE_RATE); // 自适应间隔（采样）
 
   constructor(engine: AsrInferenceEngine, callbacks: PipelineCallbacks) {
@@ -307,6 +313,8 @@ export class TranscriptionPipeline {
     );
     if (result.text) {
       this.onPartial({ text: result.text });
+      // 留作定稿失败时的抢救文本（见 finalizeSegment）：记录本次 partial 及其语言
+      this.lastPartial = result;
     }
     this.lastPartialAt = this.totalSamples;
   }
@@ -318,12 +326,24 @@ export class TranscriptionPipeline {
     this.partialFloor = to;
 
     const audio = this.historySlice(from, to);
-    const result = this.transcribe(audio);
-    // 跳过空段，以及只有标点/符号、没有任何文字数字的段（短噪音常被识别成「。」）
+    let result = this.transcribe(audio);
     if (!result.text || !/[\p{L}\p{N}]/u.test(result.text)) {
-      this.onPartial({ text: '' }); // 无确定文本被丢弃：清空识别区，回到「聆听中」
-      return;
+      // 定稿解码无实文（整段重解码与逐次 partial 是独立两遍，结果可能不同）。
+      // 长段（说明确实在说话，且识别区已给用户看过 partial 文本）用最近一次 partial 抢救定稿，
+      // 避免整段无声丢失——用户看到的文字消失且历史里不留痕迹；
+      // 短段维持丢弃（短噪音常被识别成「。」，本过滤即为此而设）。
+      const salvageable =
+        to - from >= SALVAGE_MIN_SECONDS * SAMPLE_RATE &&
+        this.lastPartial &&
+        /[\p{L}\p{N}]/u.test(this.lastPartial.text);
+      if (!salvageable) {
+        this.lastPartial = null;
+        this.onPartial({ text: '' }); // 无确定文本被丢弃：清空识别区，回到「聆听中」
+        return;
+      }
+      result = this.lastPartial!;
     }
+    this.lastPartial = null;
 
     // 有结果时不在此处清 partial：整段最终解码是独立的一遍、比逐次 partial 慢，
     // 若解码前就清空识别区，会先空、解码完才上屏，造成"识别区文字消失→确定句延迟出现"的断档。
