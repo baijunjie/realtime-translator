@@ -25,8 +25,11 @@ const MAX_HISTORY_SECONDS = 60;
 // 不在固定时刻硬切，而是在最近一段音频里找“能量最低点”（词间微停顿）作为切点，
 // 尽量不切在半词上。SOFT 上限触发搜索；搜索只看最近 SEARCH 秒；切点前至少保留 MIN 秒。
 const MAX_SEGMENT_SECONDS = 7;
-const SPLIT_SEARCH_SECONDS = 2;
+const SPLIT_SEARCH_SECONDS = 3;
 const MIN_SEGMENT_SECONDS = 4;
+// 强切不是自然停顿，切点常落在词中间：下一段起点向前重叠回看，让跨切点的词完整落入
+// 下一段（前一段被截断的尾巴本就会误解码，偶发的音节级重复远好于跨界整词丢失）。
+const SPLIT_OVERLAP_SECONDS = 0.4;
 
 // 说话过程中每隔这么久就对当前未结束的语音做一次部分识别，让文字实时出现（最小间隔）
 const PARTIAL_INTERVAL_SECONDS = 0.6;
@@ -269,7 +272,10 @@ export class TranscriptionPipeline {
         const from = Math.max(earliest, this.totalSamples - Math.round(SPLIT_SEARCH_SECONDS * SAMPLE_RATE));
         const cut = this.quietestPoint(from, this.totalSamples);
         this.finalizeSegment(this.segStart, cut);
-        this.segStart = cut;
+        // 下一段带重叠回看（cut ≥ 段起点+MIN_SEGMENT，回看不会越过上一段起点）；
+        // partialFloor 保持在 cut——重叠只作用于强切延续的同一话流，
+        // 不影响此后自然新段的句首回看边界。
+        this.segStart = cut - Math.round(SPLIT_OVERLAP_SECONDS * SAMPLE_RATE);
       }
       this.maybePartial();
     } else if (this.speechActive) {

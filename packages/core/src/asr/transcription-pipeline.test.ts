@@ -157,9 +157,9 @@ describe('TranscriptionPipeline 切段', () => {
     expect(h.segments[0].start).toBeCloseTo(0, 5);
     expect(h.segments[0].duration).toBeGreaterThan(5.3);
     expect(h.segments[0].duration).toBeLessThan(5.9);
-    // 第二段紧接切点直到 flush
+    // 第二段起点带 0.4s 重叠回看（跨切点的词完整落入下一段），随后直到 flush
     const cut = h.segments[0].duration;
-    expect(h.segments[1].start).toBeCloseTo(cut, 1);
+    expect(h.segments[1].start).toBeCloseTo(cut - 0.4, 1);
     expect(h.segments[1].start + h.segments[1].duration).toBeCloseTo(8, 1);
   });
 
@@ -278,5 +278,19 @@ describe('最短解码时长（过短输入补零，防原生层崩溃）', () =
     for (const n of received) {
       expect(n).toBeGreaterThanOrEqual(0.5 * SAMPLE_RATE);
     }
+  });
+});
+
+describe('强切重叠回看', () => {
+  it('强切后下一段起点相对切点向前重叠约 0.4s（相邻段时间轴重叠）', () => {
+    const h = makeHarness();
+    h.engine.result = { text: '连续快语速内容', lang: '<|ja|>' };
+    // 连续说话 9s：7s 处触发强切出第一段，随后静音定稿第二段
+    h.feed(9, true);
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(2);
+    const [a, b] = h.segments;
+    const gap = b.start - (a.start + a.duration); // 第二段起点相对第一段终点
+    expect(gap).toBeCloseTo(-0.4, 1); // 负值 = 重叠回看
   });
 });
