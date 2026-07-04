@@ -47,6 +47,9 @@ const SALVAGE_MIN_SECONDS = 2;
 // 用最佳 partial 顶替。比例取保守值，避免误伤「定稿略短于 partial」的正常情形。
 const COLLAPSE_RATIO = 0.4;
 const COLLAPSE_MIN_PARTIAL_CHARS = 6;
+// 抢救时补解尾部的最短时长：最佳 partial 未覆盖的段尾达到该值才单独补解一次。
+// 交叠语音污染的是窗口前缀——脱离被污染前缀、从 partial 覆盖终点起的尾部窗口通常能解码干净。
+const SALVAGE_TAIL_MIN_SECONDS = 0.8;
 
 // 单次解码的最短输入时长：transducer 类模型（zipformer/NeMo）的卷积下采样对过短输入
 // 会在原生层抛异常——JS 无法捕获，识别子进程直接终止（实测 reazonspeech zipformer 的
@@ -172,8 +175,9 @@ export class TranscriptionPipeline {
   private speechEnd = 0; // 最近一次检测到语音的采样位置（用于静音去抖与段尾）
   private partialFloor = 0; // 已最终确定的音频边界，部分识别不回看到此之前
   private lastPartialAt = 0; // 上次做部分识别时的 totalSamples
-  // 本段最佳（最长实文）partial 结果：定稿解码无实文或坍缩时用于抢救（见 finalizeSegment）
-  private bestPartial: { text: string; lang: string } | null = null;
+  // 本段最佳（最长实文）partial 结果及其窗口终点：定稿解码无实文或坍缩时用于抢救，
+  // 终点之后未被它覆盖的段尾在抢救时单独补解（见 finalizeSegment）
+  private bestPartial: { text: string; lang: string; end: number } | null = null;
   private partialGap = Math.round(PARTIAL_INTERVAL_SECONDS * SAMPLE_RATE); // 自适应间隔（采样）
 
   private readonly onLog: (line: string) => void;
@@ -349,11 +353,27 @@ export class TranscriptionPipeline {
       this.onPartial({ text: result.text });
       // 留作定稿失败/坍缩时的抢救文本（见 finalizeSegment）：保留本段最长的一次 partial。
       // 交叠语音下逐次 partial 会震荡（长文与「はい」级短语交替），最长者信息量最大。
-      if (!this.bestPartial || Array.from(result.text).length > Array.from(this.bestPartial.text).length) {
-        this.bestPartial = result;
+      // 同长文本取最靠后的窗口终点（>=）：覆盖尽可能多的段内音频，抢救时需补解的尾部更短。
+      if (!this.bestPartial || Array.from(result.text).length >= Array.from(this.bestPartial.text).length) {
+        this.bestPartial = { ...result, end: this.totalSamples };
       }
     }
     this.lastPartialAt = this.totalSamples;
+  }
+
+  /**
+   * 抢救定稿：最佳 partial 只覆盖到其窗口终点，之后的段尾（交叠语音里往往是脱离
+   * 污染前缀后能解码干净的部分）单独补解一次并拼接，避免尾部内容随坍缩一起丢失。
+   */
+  private withSalvagedTail(
+    best: { text: string; lang: string; end: number },
+    to: number,
+  ): { text: string; lang: string } {
+    if (to - best.end < SALVAGE_TAIL_MIN_SECONDS * SAMPLE_RATE) return best;
+    const tail = this.transcribe(this.historySlice(best.end, to));
+    if (!tail.text || !/[\p{L}\p{N}]/u.test(tail.text)) return best;
+    this.onLog(`salvage-tail win=[${this.ts(best.end)},${this.ts(to)}] text="${tail.text}"`);
+    return { text: best.text + tail.text, lang: best.lang };
   }
 
   /** 把历史缓冲 [from, to) 这段音频定稿为一个最终段 */
@@ -381,7 +401,7 @@ export class TranscriptionPipeline {
         this.onPartial({ text: '' }); // 无确定文本被丢弃：清空识别区，回到「聆听中」
         return;
       }
-      result = best;
+      result = this.withSalvagedTail(best, to);
       this.onLog(`finalize → SALVAGE(empty) text="${result.text}"`);
     } else if (
       longEnough &&
@@ -389,7 +409,7 @@ export class TranscriptionPipeline {
       Array.from(best.text).length >= COLLAPSE_MIN_PARTIAL_CHARS &&
       Array.from(result.text).length < COLLAPSE_RATIO * Array.from(best.text).length
     ) {
-      result = best;
+      result = this.withSalvagedTail(best, to);
       this.onLog(`finalize → SALVAGE(collapse) text="${result.text}"`);
     }
     this.bestPartial = null;

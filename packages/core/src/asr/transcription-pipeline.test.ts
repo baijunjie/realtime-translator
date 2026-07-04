@@ -296,9 +296,9 @@ describe('强切重叠回看', () => {
 });
 
 describe('坍缩定稿抢救（定稿远短于本段最佳 partial）', () => {
-  it('交叠语音式坍缩：6.7s 段定稿只剩「はい」→ 用最佳 partial 顶替', () => {
+  it('交叠语音式坍缩：定稿只剩「はい」→ 最佳 partial 顶替 + 未覆盖尾部补解拼接', () => {
     const h = makeHarness();
-    // partial 阶段给出完整长文
+    // partial 阶段给出完整长文（覆盖到 ~3s）
     h.engine.result = { text: 'こんにちは証券投資調査部の島田です', lang: '<|ja|>' };
     h.feed(3, true);
     // 后续 partial 与定稿都坍缩为短语
@@ -306,7 +306,28 @@ describe('坍缩定稿抢救（定稿远短于本段最佳 partial）', () => {
     h.feed(3.5, true);
     h.feed(0.5, false);
     expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('こんにちは証券投資調査部の島田です');
+    // 定稿 = 最佳 partial + 尾部（[~3s, 段尾] 单独补解，此处引擎对该窗口返回「はい」）
+    expect(h.segments[0].text).toBe('こんにちは証券投資調査部の島田ですはい');
+  });
+
+  it('尾部补解能救回最佳 partial 未覆盖的内容（如日期句）', () => {
+    const h = makeHarness();
+    // 前 3s：partial 解出自我介绍
+    h.engine.result = { text: '岩井コスモ証券の島田です', lang: '<|ja|>' };
+    h.feed(3, true);
+    // 之后 partial 全部坍缩
+    h.engine.result = { text: 'はい', lang: '<|ja|>' };
+    h.feed(3.5, true);
+    // 定稿阶段：整窗仍坍缩，但「尾部单独补解」（窗口 < 4s）返回日期句
+    h.engine.transcribe = (samples: Float32Array) => {
+      const secs = samples.length / SAMPLE_RATE;
+      return secs < 4.5
+        ? { text: '七月三日金曜日ですね', lang: '<|ja|>' }
+        : { text: 'はい', lang: '<|ja|>' };
+    };
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('岩井コスモ証券の島田です七月三日金曜日ですね');
   });
 
   it('正常情形：定稿与最佳 partial 相当 → 保留定稿', () => {
