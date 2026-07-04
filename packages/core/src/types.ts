@@ -122,6 +122,12 @@ export type UiLang = 'en' | 'ja' | 'ko' | 'zh';
  */
 export type AsrLang = 'auto' | 'en' | 'ja' | 'ko' | 'zh';
 
+/**
+ * ASR 行内文本提交策略（按模型解码特性选择，取值见 models.ts 各模型的注释）：
+ * agreement = 一致前缀提交（LocalAgreement-2），chunk = 定长分块独立解码提交。
+ */
+export type AsrCommitStrategy = 'agreement' | 'chunk';
+
 /** 运行平台标识：由各端桥接注入，用于按平台过滤可用模型、收敛音源等。 */
 export type Platform = 'macos' | 'web' | 'ios';
 

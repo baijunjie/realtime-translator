@@ -210,16 +210,28 @@ async function handleInit(msg) {
         const result = recognizer.getResult(stream);
         stream.free();
         // senseVoice 用结果自带语言标记；专用引擎无标记，用注册表首个语言固定填充。
-        return { text: result.text || '', lang: fixedLang ?? (result.lang || '') };
+        // tokens/timestamps 透传给 core 供窗口滑动定位提交边界（缺失时 core 走 fallback）。
+        return {
+          text: result.text || '',
+          lang: fixedLang ?? (result.lang || ''),
+          tokens: result.tokens,
+          timestamps: result.timestamps,
+          durations: result.durations,
+        };
       },
     };
 
     warmupRecognizer();
 
-    pipeline = new TranscriptionPipeline(engine, {
-      onSegment: (seg) => post({ type: 'segment', ...seg }),
-      onPartial: (p) => post({ type: 'partial', text: p.text }),
-    });
+    // 提交策略随模型注入：非自回归模型走一致前缀提交，自回归 transducer 走定长分块提交。
+    pipeline = new TranscriptionPipeline(
+      engine,
+      {
+        onSegment: (seg) => post({ type: 'segment', ...seg }),
+        onPartial: (p) => post({ type: 'partial', text: p.text }),
+      },
+      spec.commitStrategy ?? 'agreement',
+    );
     post({ type: 'ready' });
     // 排空 init 前积压的帧。
     const queued = frameQueue;

@@ -8,7 +8,7 @@
 //
 // 翻译模型（Xenova/m2m100_418M）的规格见 ./translation/local-spec.ts。
 import { ghModelAsset } from './model-assets';
-import type { AsrLang, Platform } from './types';
+import type { AsrCommitStrategy, AsrLang, Platform } from './types';
 
 /** HuggingFace 上 csukuangfj 账号某仓的 resolve 基址（文件按 `${base}/<file>` 取）。 */
 function hfBase(repo: string): string {
@@ -65,6 +65,13 @@ export interface AsrModelSpec {
   engine: 'senseVoice' | 'paraformer' | 'transducer';
   /** transducer 的具体子类型（NeMo transducer 需标记 'nemo_transducer'）。 */
   modelType?: string;
+  /**
+   * 行内文本提交策略（转写管线据此选择说话过程中的落定方式）：
+   * 非自回归模型（senseVoice/paraformer）对增长窗口的解码前缀单调稳定，
+   * 适用一致前缀提交（agreement）；自回归 transducer（zipformer/NeMo TDT）
+   * 对增长窗口输出非单调、会震荡坍缩，改用定长分块独立解码提交（chunk）。
+   */
+  commitStrategy: AsrCommitStrategy;
   /** 模型文件所在子目录（相对 models 目录）。 */
   dir: string;
   /** 该模型的全部需下载文件（不含公共依赖 Silero VAD）。 */
@@ -111,6 +118,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     nameKey: 'models.senseVoice',
     languages: ['auto', 'en', 'ja', 'ko', 'zh'],
     engine: 'senseVoice',
+    commitStrategy: 'agreement',
     dir: SENSE_VOICE_DIR,
     files: [
       asrFile('sense-voice', SENSE_VOICE_DIR, 'model.int8.onnx', 239_233_841, 'model'),
@@ -124,6 +132,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     nameKey: 'models.paraformerZh',
     languages: ['zh'],
     engine: 'paraformer',
+    commitStrategy: 'agreement',
     dir: PARAFORMER_ZH_DIR,
     files: [
       asrFile('paraformer-zh', PARAFORMER_ZH_DIR, 'model.int8.onnx', 227_330_205, 'model'),
@@ -137,6 +146,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     nameKey: 'models.reazonspeechJa',
     languages: ['ja'],
     engine: 'transducer',
+    commitStrategy: 'chunk',
     dir: REAZONSPEECH_JA_DIR,
     // web 上游权重个体文件取自源仓 reazonspeech-k2-v2：预置包 sherpa-onnx-zipformer-ja-
     // reazonspeech-2024-08-01 仅以 GitHub release tar 包整体分发，无逐文件 HF 直链。
@@ -156,6 +166,7 @@ export const ASR_MODELS: readonly AsrModelSpec[] = [
     languages: ['en'],
     engine: 'transducer',
     modelType: 'nemo_transducer',
+    commitStrategy: 'chunk',
     dir: PARAKEET_EN_DIR,
     files: [
       asrFile('parakeet-tdt-0.6b-v2-en', PARAKEET_EN_DIR, 'encoder.int8.onnx', 652_184_296, 'encoder'),

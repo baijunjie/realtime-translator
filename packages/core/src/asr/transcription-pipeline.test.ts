@@ -5,9 +5,13 @@ import {
   SAMPLE_RATE,
   type AsrInferenceEngine,
 } from './transcription-pipeline';
-import type { SegmentPayload } from '../types';
+import type { SegmentPayload, AsrCommitStrategy } from '../types';
 
-// 可编程假引擎：VAD 探测结果由测试逐步设置，识别结果固定返回。
+// ============================================================================
+// 简单假引擎：VAD 探测由测试逐步设置，识别结果固定返回（不带 tokens/timestamps
+// → core 判定为无时间戳，走 fallback：不滑动、尾部截断窗口）。用于切段/一致提交/
+// 定稿逻辑等不依赖窗口滑动的用例。
+// ============================================================================
 class FakeEngine implements AsrInferenceEngine {
   detected = false;
   result: { text: string; lang: string } = { text: '你好世界', lang: '<|zh|>' };
@@ -55,6 +59,113 @@ function makeHarness(): Harness {
       }
     },
   };
+}
+
+// ============================================================================
+// 可编程假引擎：透传 tokens/timestamps（→ core 启用窗口滑动）。喂入的音频用「样本值 =
+// 绝对采样序号 + 1」编码（补零在尾部为 0，可区分），引擎据 samples[0] 反解出本次解码
+// 窗口的起点，交给 respond 按 [起点秒, 终点秒] 返回结果，从而精确断言引擎收到的音频区间。
+// ============================================================================
+interface DecodeResult {
+  text: string;
+  lang?: string;
+  tokens?: string[];
+  timestamps?: number[];
+  durations?: number[];
+}
+class RampEngine implements AsrInferenceEngine {
+  detected = false;
+  respond: (startSec: number, endSec: number) => DecodeResult = () => ({ text: '' });
+  calls: { startSec: number; endSec: number; text: string }[] = [];
+  acceptVadWindow(): void {}
+  isSpeechDetected(): boolean {
+    return this.detected;
+  }
+  drainVad(): void {}
+  flushVad(): void {}
+  transcribe(samples: Float32Array): DecodeResult & { lang: string } {
+    let n = samples.length;
+    while (n > 0 && samples[n - 1] === 0) n--; // 去掉尾部补零
+    if (n === 0) return { text: '', lang: '' }; // 纯补零输入（空窗口定稿），无内容
+    const startSec = (samples[0] - 1) / SAMPLE_RATE; // 值 = 绝对序号 + 1
+    const endSec = startSec + n / SAMPLE_RATE;
+    const r = this.respond(startSec, endSec);
+    this.calls.push({ startSec, endSec, text: r.text });
+    return { text: r.text, lang: r.lang ?? '<|ja|>', tokens: r.tokens, timestamps: r.timestamps, durations: r.durations };
+  }
+}
+
+interface RampHarness {
+  engine: RampEngine;
+  pipeline: TranscriptionPipeline;
+  segments: SegmentPayload[];
+  partials: string[];
+  /** 喂入 seconds 秒「斜坡编码」音频（样本值=绝对序号+1，供引擎反解窗口） */
+  feed(seconds: number, detected: boolean): void;
+}
+
+function makeRampHarness(strategy: AsrCommitStrategy = 'agreement'): RampHarness {
+  const engine = new RampEngine();
+  const segments: SegmentPayload[] = [];
+  const partials: string[] = [];
+  const pipeline = new TranscriptionPipeline(
+    engine,
+    {
+      onSegment: (seg) => segments.push(seg),
+      onPartial: (p) => partials.push(p.text),
+    },
+    strategy,
+  );
+  let fed = 0; // 已喂入采样总数（与管线 totalSamples 同步，用作绝对序号）
+  return {
+    engine,
+    pipeline,
+    segments,
+    partials,
+    feed(seconds, detected) {
+      engine.detected = detected;
+      const chunks = Math.round((seconds * SAMPLE_RATE) / CHUNK);
+      for (let i = 0; i < chunks; i++) {
+        const samples = new Float32Array(CHUNK);
+        for (let k = 0; k < CHUNK; k++) samples[k] = fed++ + 1;
+        pipeline.acceptWaveform(samples);
+      }
+    },
+  };
+}
+
+// 按「绝对时间 → 字」的 token 时间表构造稳定解码器：同一绝对时间总解出同一字（模型稳定），
+// 返回窗口 [startSec, endSec) 内的字及其相对本窗起点的时间戳。
+function scheduleDecode(schedule: { t: number; ch: string }[], dur = 0.4) {
+  return (startSec: number, endSec: number): DecodeResult => {
+    const tokens: string[] = [];
+    const timestamps: number[] = [];
+    const durations: number[] = [];
+    let text = '';
+    for (const { t, ch } of schedule) {
+      if (t >= startSec - 1e-6 && t < endSec - 1e-6) {
+        tokens.push(ch);
+        timestamps.push(Math.round((t - startSec) * 1000) / 1000);
+        durations.push(dur);
+        text += ch;
+      }
+    }
+    return { text, tokens, timestamps, durations, lang: '<|ja|>' };
+  };
+}
+
+// 虚拟均匀转写：第 i 个字在绝对时间 i*DT 说出。
+const DT = 0.4;
+const VCHARS = Array.from('あいうえおかきくけこさしすせそたちつてとなにぬねの'); // 25 字 = 0..9.6s
+const virtualDecode = scheduleDecode(
+  VCHARS.map((ch, i) => ({ t: i * DT, ch })),
+  DT,
+);
+/** 虚拟转写在 [0, endSec) 的完整文本（用作无丢失断言的期望值）。 */
+function virtualUpTo(endSec: number): string {
+  let s = '';
+  for (let i = 0; i < VCHARS.length; i++) if (i * DT < endSec - 1e-6) s += VCHARS[i];
+  return s;
 }
 
 describe('TranscriptionPipeline 切段', () => {
@@ -134,35 +245,6 @@ describe('TranscriptionPipeline 切段', () => {
     expect(seg.id).toBe(0);
   });
 
-  it('连续语音超过上限时在能量最低点兜底断句', () => {
-    const h = makeHarness();
-    h.engine.result = { text: 'test speech', lang: '<|en|>' };
-    // 8s 连续语音，其中 [5.5s, 5.7s) 是低能量窗口（词间微停顿）
-    h.engine.detected = true;
-    const total = 8 * SAMPLE_RATE;
-    const quietFrom = 5.5 * SAMPLE_RATE;
-    const quietTo = 5.7 * SAMPLE_RATE;
-    for (let at = 0; at < total; at += CHUNK) {
-      const samples = new Float32Array(CHUNK);
-      for (let k = 0; k < CHUNK; k++) {
-        const pos = at + k;
-        samples[k] = pos >= quietFrom && pos < quietTo ? 0 : 0.5;
-      }
-      h.pipeline.acceptWaveform(samples);
-    }
-    h.pipeline.flush();
-
-    expect(h.segments).toHaveLength(2);
-    // 第一段在 7s 上限触发时于最低能量处（~5.6s）切开，而非硬切在 7s
-    expect(h.segments[0].start).toBeCloseTo(0, 5);
-    expect(h.segments[0].duration).toBeGreaterThan(5.3);
-    expect(h.segments[0].duration).toBeLessThan(5.9);
-    // 第二段起点带 0.4s 重叠回看（跨切点的词完整落入下一段），随后直到 flush
-    const cut = h.segments[0].duration;
-    expect(h.segments[1].start).toBeCloseTo(cut - 0.4, 1);
-    expect(h.segments[1].start + h.segments[1].duration).toBeCloseTo(8, 1);
-  });
-
   it('空段与纯标点段被丢弃且清空识别区', () => {
     for (const text of ['', '。', '！？…']) {
       const h = makeHarness();
@@ -210,51 +292,239 @@ describe('cleanAsrText', () => {
   });
 });
 
-describe('定稿抢救（定稿解码无实文时用最近 partial 顶替）', () => {
-  it('长段定稿为空：用最近一次有实文的 partial 抢救，不丢段', () => {
+describe('一致前缀提交（LocalAgreement-2）', () => {
+  it('解码震荡（长句→はい→长句）：已提交前缀不回退，定稿不输出坍缩结果', () => {
     const h = makeHarness();
-    // 说话 3s：期间 partial 正常出实文
-    h.engine.result = { text: '这是前半句', lang: '<|zh|>' };
-    h.feed(3, true);
-    // 静音断句前把引擎切到「定稿解码为空」：模拟整段重解码偶发失败
-    h.engine.result = { text: '', lang: '' };
+    // 提交「こんにちは」
+    h.engine.result = { text: 'こんにちは', lang: '<|ja|>' };
+    h.feed(1.4, true);
+    // 解码坍缩为「はい」：与已提交前缀不一致，不得回退、不得展示坍缩文本
+    h.engine.result = { text: 'はい', lang: '<|ja|>' };
+    h.feed(0.7, true);
+    expect(h.partials).not.toContain('はい');
+    // 解码恢复并延伸到「こんにちは世界」：提交前缀延长
+    h.engine.result = { text: 'こんにちは世界', lang: '<|ja|>' };
+    h.feed(1.4, true);
+    // 定稿时再次坍缩为「はい」：以已提交前缀为准，不采纳坍缩定稿
+    h.engine.result = { text: 'はい', lang: '<|ja|>' };
     h.feed(0.5, false);
+
     expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('这是前半句');
-    expect(h.segments[0].lang).toBe('zh');
+    expect(h.segments[0].text).toBe('こんにちは世界');
   });
 
-  it('长段定稿为纯标点：同样走抢救', () => {
+  it('定稿 tail 以已提交前缀为前缀（正常延伸）→ 取 tail', () => {
     const h = makeHarness();
-    h.engine.result = { text: '前半句内容', lang: '<|ja|>' };
-    h.feed(3, true);
-    h.engine.result = { text: '。', lang: '<|ja|>' };
-    h.feed(0.5, false);
+    h.engine.result = { text: '前半部分', lang: '<|ja|>' };
+    h.feed(2, true); // 提交「前半部分」
+    h.engine.result = { text: '前半部分の続きです', lang: '<|ja|>' };
+    h.feed(0.5, false); // 定稿尾部解码延伸
     expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('前半句内容');
+    expect(h.segments[0].text).toBe('前半部分の続きです');
   });
 
-  it('短段（低于抢救阈值）定稿为空：维持丢弃（短噪音过滤语义不变）', () => {
+  it('定稿 tail 与已提交前缀不一致（坍缩）→ 保底取已提交前缀', () => {
     const h = makeHarness();
-    h.engine.result = { text: '嗯', lang: '<|zh|>' };
-    h.feed(1, true);
-    h.engine.result = { text: '。', lang: '<|zh|>' };
-    h.feed(0.5, false);
-    expect(h.segments).toHaveLength(0);
+    h.engine.result = { text: '完全な文章です', lang: '<|ja|>' };
+    h.feed(2, true); // 提交「完全な文章です」
+    h.engine.result = { text: 'はい', lang: '<|ja|>' };
+    h.feed(0.5, false); // 定稿坍缩，弃 tail 保底
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('完全な文章です');
   });
 
-  it('抢救文本不跨段复用：上一段的 partial 不会救下一段', () => {
+  it('句末标点随窗口增长被改写（。→、）不卡死提交', () => {
     const h = makeHarness();
-    // 第一段正常定稿（消费掉 lastPartial）
-    h.engine.result = { text: '第一段', lang: '<|zh|>' };
-    h.feed(3, true);
-    h.feed(0.5, false);
-    // 第二段：partial 与定稿都无实文 → 丢弃，且不得借用第一段的文本
-    h.engine.result = { text: '', lang: '' };
-    h.feed(3, true);
+    h.engine.result = { text: 'こんにちは。', lang: '<|ja|>' };
+    h.feed(1.4, true); // 提交「こんにちは」（尾部句号不落定）
+    h.engine.result = { text: 'こんにちは、証券投資部です', lang: '<|ja|>' };
+    h.feed(1.4, true); // 。改写为、并延伸，提交前缀应能继续延长
     h.feed(0.5, false);
     expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('第一段');
+    expect(h.segments[0].text).toBe('こんにちは、証券投資部です');
+  });
+
+  it('CJK 逐 token 空格漂移不卡死提交', () => {
+    const h = makeHarness();
+    h.engine.result = { text: '本日 は', lang: '<|ja|>' };
+    h.feed(1.4, true); // 提交「本日は」（CJK 间空格归一）
+    h.engine.result = { text: '本日 はよろしく', lang: '<|ja|>' }; // 空格位置漂移 + 延伸
+    h.feed(1.4, true);
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('本日はよろしく');
+  });
+});
+
+describe('窗口滑动（污染逐出）', () => {
+  it('提交足够后 windowStart 前移，旧音频不再进入后续解码输入，且全程无丢失', () => {
+    const h = makeRampHarness();
+    h.engine.respond = virtualDecode;
+    h.feed(6, true); // 6s 连续语音（<7s 强切阈值，隔离窗口滑动逻辑）
+    h.feed(0.6, false); // 静音定稿
+
+    // 至少滑动过一次：出现过起点显著大于 0 的解码窗口
+    expect(h.engine.calls.some((c) => c.startSec >= 2.5)).toBe(true);
+    // 窗口不无界增长：任一次解码窗口时长受滑动约束（远低于 fallback 的 8s 截断）
+    expect(h.engine.calls.every((c) => c.endSec - c.startSec <= 4.5)).toBe(true);
+    // 污染逐出：进入语音后段（endSec≥5s）的解码窗口起点已越过早期音频
+    expect(h.engine.calls.filter((c) => c.endSec >= 5).every((c) => c.startSec >= 2.5)).toBe(true);
+    // 无丢失：定稿文本 = 截至段尾的完整虚拟转写
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe(virtualUpTo(6.0));
+  });
+});
+
+describe('停滞保护', () => {
+  it('持续不一致（音频解不出）时窗口不无界增长', () => {
+    const h = makeRampHarness();
+    let n = 0;
+    // 每次解码返回不同文本（首字符即不同）→ 一致前缀恒为空、永不提交
+    h.engine.respond = () => {
+      n++;
+      return { text: `${n}号目です`, tokens: ['x', 'y', 'z'], timestamps: [0, 0.1, 0.2], durations: [0.1, 0.1, 0.1] };
+    };
+    h.feed(25, true); // 25s 连续说话；无停滞保护会让窗口长到 ~25s
+    // 窗口被停滞保护钳制在 ~8s 量级（触发滑动的那一 tick 略超 8s，之后回落）
+    expect(h.engine.calls.every((c) => c.endSec - c.startSec <= 9)).toBe(true);
+    // 确实增长过（不是每次都很短）——证明是「增长到上限再回落」而非从不增长
+    expect(h.engine.calls.some((c) => c.endSec - c.startSec >= 7)).toBe(true);
+  });
+});
+
+describe('长行强切', () => {
+  it('切在提交边界：两行拼接无重复无丢失，时间轴相接不重叠', () => {
+    const h = makeRampHarness();
+    h.engine.respond = virtualDecode;
+    h.feed(9, true); // 9s 连续说话，7s 处触发强切
+    h.feed(0.6, false); // 静音定稿第二行
+
+    expect(h.segments).toHaveLength(2);
+    const [a, b] = h.segments;
+    // 拼接无重复无丢失 = 截至段尾的完整虚拟转写
+    expect(a.text + b.text).toBe(virtualUpTo(9.0));
+    // 切点即提交边界：第二行紧接第一行，无重叠回看
+    expect(b.start).toBeCloseTo(a.start + a.duration, 1);
+    expect(a.start).toBeCloseTo(0, 5);
+  });
+});
+
+describe('agreement 滑动守卫', () => {
+  it('翻供 tick（解码不以已提交前缀开头）不滑动窗口，即使对齐结果达到滑动阈值', () => {
+    const h = makeRampHarness();
+    // 前 2s 稳定解出「あいう」并提交；之后翻供为完全不同的文本，其 token 时间戳跨 3s+
+    // （若不加守卫，按码点数对齐会得到 endSec≥3 → 误滑）
+    h.engine.respond = (s, e) =>
+      e <= 2.0
+        ? { text: 'あいう', tokens: ['あ', 'い', 'う'], timestamps: [0, 0.4, 0.8], durations: [0.4, 0.4, 0.4] }
+        : { text: 'ワンツー', tokens: ['ワ', 'ン', 'ツ'], timestamps: [0, 1.5, 2.9], durations: [0.4, 0.4, 0.4] };
+    h.feed(4.5, true);
+    // 从未滑动：所有解码窗口都自行首
+    expect(h.engine.calls.every((c) => c.startSec === 0)).toBe(true);
+    h.feed(0.6, false);
+    // 定稿保底：tail 翻供 → 保留已提交前缀，翻供文本不进定稿
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('あいう');
+  });
+});
+
+describe('chunk 提交（自回归 transducer 定长分块）', () => {
+  it('窗口积累到块长即整块提交并前移窗口，切点选在块内可信停顿的下一 token 起点前', () => {
+    const h = makeRampHarness('chunk');
+    // token 时间表：0~1.2s 每 0.4s 一字，之后停顿（1.6~2.4 无 token），2.4s 起继续每 0.4s
+    // 一字。首块在窗口达块长（3s）的 tick 触发：块内停顿间隙 0.8s ≥ 可信停顿阈值 →
+    // 切点 = 下一 token 起点 2.4 − 发射滞后回退 0.1 = 2.3s
+    const head = Array.from('あいうえ').map((ch, i) => ({ t: i * 0.4, ch }));
+    const rest = Array.from('おかきくけこさし').map((ch, i) => ({ t: 2.4 + i * 0.4, ch }));
+    h.engine.respond = scheduleDecode([...head, ...rest]);
+    h.feed(6.0, true);
+    h.feed(0.6, false);
+
+    // 块提交后窗口前移到停顿处（2.3s 附近），后续解码不再包含已提交音频
+    expect(h.engine.calls.some((c) => Math.abs(c.startSec - 2.3) < 0.1)).toBe(true);
+    // 定稿无重复无丢失
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('あいうえおかきくけこさし');
+  });
+
+  it('空块（解不出文本）也前移窗口，防无界增长', () => {
+    const h = makeRampHarness('chunk');
+    // 首个 tick 有实文（确立引擎有时间戳），之后全部解空
+    h.engine.respond = (s, e) =>
+      e <= 0.7 ? { text: 'あ', tokens: ['あ'], timestamps: [0.1], durations: [0.3] } : { text: '' };
+    h.feed(20, true);
+    // 空块每次在窗口达块长时前移：解码窗口有界（不随 20s 语音无限增长）
+    expect(h.engine.calls.every((c) => c.endSec - c.startSec <= 5)).toBe(true);
+    h.feed(0.6, false);
+    expect(h.segments).toHaveLength(0); // 全程无实文 → 行被 blip 过滤丢弃
+  });
+
+  it('fallback（无 timestamps）：不做块提交，定稿走尾部解码，文本完整', () => {
+    const h = makeRampHarness('chunk');
+    h.engine.respond = (s, e) => ({ text: virtualDecode(s, e).text }); // 去掉 tokens/timestamps
+    h.feed(5, true);
+    h.feed(0.6, false);
+    // 从不前移窗口：所有解码都自行首
+    expect(h.engine.calls.every((c) => c.startSec === 0)).toBe(true);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe(virtualUpTo(5.0));
+  });
+
+  it('长行强切：切在块提交边界，两行拼接无重复无丢失', () => {
+    const h = makeRampHarness('chunk');
+    h.engine.respond = virtualDecode;
+    h.feed(9, true); // 9s 连续说话：~4s 处块提交，7s 处强切
+    h.feed(0.6, false);
+
+    expect(h.segments).toHaveLength(2);
+    const [a, b] = h.segments;
+    expect(a.text + b.text).toBe(virtualUpTo(9.0));
+    // 切点即块提交边界：两行时间轴相接，无重叠回看
+    expect(b.start).toBeCloseTo(a.start + a.duration, 1);
+  });
+
+  it('短窗解码震荡只影响展示，不进已提交文本与定稿', () => {
+    const h = makeRampHarness('chunk');
+    // 行首增长窗（起点 0）未达块长（3s）时解码震荡；达块长的提交解码与行中解码稳定
+    let flip = false;
+    h.engine.respond = (s, e) => {
+      if (s === 0 && e - s < 2.9) {
+        flip = !flip;
+        return {
+          text: flip ? 'はい' : 'ええと',
+          tokens: ['は', 'い'],
+          timestamps: [0, 0.2],
+          durations: [0.2, 0.2],
+        };
+      }
+      return virtualDecode(s, e);
+    };
+    h.feed(6, true);
+    h.feed(0.6, false);
+
+    // 震荡文本出现在过程展示里（正常），但不落进定稿
+    expect(h.partials.some((p) => p.includes('はい') || p.includes('ええと'))).toBe(true);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe(virtualUpTo(6.0));
+    expect(h.segments[0].text).not.toContain('はい');
+  });
+});
+
+describe('fallback（引擎无 timestamps）', () => {
+  it('不滑动窗口，仍能一致提交并定稿出完整文本', () => {
+    const h = makeRampHarness();
+    // 稳定转写但不带 tokens/timestamps → core 判定无时间戳，走 fallback
+    h.engine.respond = (s, e) => {
+      const v = virtualDecode(s, e);
+      return { text: v.text }; // 去掉 tokens/timestamps
+    };
+    h.feed(5, true);
+    h.feed(0.6, false);
+
+    // 从不滑动：所有解码窗口都自行首（起点恒为 0）
+    expect(h.engine.calls.every((c) => c.startSec === 0)).toBe(true);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe(virtualUpTo(5.0));
   });
 });
 
@@ -267,85 +537,16 @@ describe('最短解码时长（过短输入补零，防原生层崩溃）', () =
       received.push(samples.length);
       return orig(samples);
     };
-    // 场景：上一段定稿后新语音立即开始（首个 partial 窗口极短）+ 极短语音段定稿
+    // 场景：上一段定稿后新语音立即开始（首个窗口极短）+ 极短语音段定稿
     h.engine.result = { text: '第一段', lang: '<|ja|>' };
     h.feed(3, true);
     h.feed(0.5, false); // 定稿第一段
-    h.feed(0.1, true); // 新段仅 0.1s 即静音（超短 partial/定稿窗口）
+    h.feed(0.1, true); // 新段仅 0.1s 即静音（超短解码窗口）
     h.feed(0.5, false);
     h.pipeline.flush();
     expect(received.length).toBeGreaterThan(0);
     for (const n of received) {
       expect(n).toBeGreaterThanOrEqual(0.5 * SAMPLE_RATE);
     }
-  });
-});
-
-describe('强切重叠回看', () => {
-  it('强切后下一段起点相对切点向前重叠约 0.4s（相邻段时间轴重叠）', () => {
-    const h = makeHarness();
-    h.engine.result = { text: '连续快语速内容', lang: '<|ja|>' };
-    // 连续说话 9s：7s 处触发强切出第一段，随后静音定稿第二段
-    h.feed(9, true);
-    h.feed(0.5, false);
-    expect(h.segments).toHaveLength(2);
-    const [a, b] = h.segments;
-    const gap = b.start - (a.start + a.duration); // 第二段起点相对第一段终点
-    expect(gap).toBeCloseTo(-0.4, 1); // 负值 = 重叠回看
-  });
-});
-
-describe('坍缩定稿抢救（定稿远短于本段最佳 partial）', () => {
-  it('交叠语音式坍缩：定稿只剩「はい」→ 最佳 partial 顶替 + 未覆盖尾部补解拼接', () => {
-    const h = makeHarness();
-    // partial 阶段给出完整长文（覆盖到 ~3s）
-    h.engine.result = { text: 'こんにちは証券投資調査部の島田です', lang: '<|ja|>' };
-    h.feed(3, true);
-    // 后续 partial 与定稿都坍缩为短语
-    h.engine.result = { text: 'はい', lang: '<|ja|>' };
-    h.feed(3.5, true);
-    h.feed(0.5, false);
-    expect(h.segments).toHaveLength(1);
-    // 定稿 = 最佳 partial + 尾部（[~3s, 段尾] 单独补解，此处引擎对该窗口返回「はい」）
-    expect(h.segments[0].text).toBe('こんにちは証券投資調査部の島田ですはい');
-  });
-
-  it('尾部补解能救回最佳 partial 未覆盖的内容（如日期句）', () => {
-    const h = makeHarness();
-    // 前 3s：partial 解出自我介绍
-    h.engine.result = { text: '岩井コスモ証券の島田です', lang: '<|ja|>' };
-    h.feed(3, true);
-    // 之后 partial 全部坍缩
-    h.engine.result = { text: 'はい', lang: '<|ja|>' };
-    h.feed(3.5, true);
-    // 定稿阶段：整窗仍坍缩，但「尾部单独补解」（窗口 < 4s）返回日期句
-    h.engine.transcribe = (samples: Float32Array) => {
-      const secs = samples.length / SAMPLE_RATE;
-      return secs < 4.5
-        ? { text: '七月三日金曜日ですね', lang: '<|ja|>' }
-        : { text: 'はい', lang: '<|ja|>' };
-    };
-    h.feed(0.5, false);
-    expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('岩井コスモ証券の島田です七月三日金曜日ですね');
-  });
-
-  it('正常情形：定稿与最佳 partial 相当 → 保留定稿', () => {
-    const h = makeHarness();
-    h.engine.result = { text: 'まず指数から振り返っていきたいと思います', lang: '<|ja|>' };
-    h.feed(5, true);
-    h.feed(0.5, false);
-    expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('まず指数から振り返っていきたいと思います');
-  });
-
-  it('最佳 partial 本身很短（低于最少码点）→ 不触发坍缩抢救', () => {
-    const h = makeHarness();
-    h.engine.result = { text: 'はい', lang: '<|ja|>' };
-    h.feed(3, true);
-    h.engine.result = { text: 'ええ', lang: '<|ja|>' };
-    h.feed(0.5, false);
-    expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('ええ');
   });
 });

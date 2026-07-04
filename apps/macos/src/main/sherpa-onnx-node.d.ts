@@ -59,6 +59,12 @@ declare module 'sherpa-onnx-node' {
     text: string;
     /** SenseVoice 的语言标记，形如 "<|zh|>" */
     lang: string;
+    /** token 级文本单元（CJK 逐字、拉丁 BPE 带 ▁ 词边界） */
+    tokens?: string[];
+    /** 各 token 起始时间（秒，相对本次输入音频起点） */
+    timestamps?: number[];
+    /** 各 token 时长（秒） */
+    durations?: number[];
   }
 
   export class OfflineRecognizer {

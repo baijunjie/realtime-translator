@@ -133,7 +133,14 @@ export class TranscriptionPipeline {
         stream.acceptWaveform({ samples, sampleRate: SAMPLE_RATE });
         this.recognizer.decode(stream);
         const result = this.recognizer.getResult(stream);
-        return { text: result.text || '', lang: this.fixedLang ?? (result.lang || '') };
+        // tokens/timestamps 透传给 core 供窗口滑动定位提交边界（缺失时 core 走 fallback）。
+        return {
+          text: result.text || '',
+          lang: this.fixedLang ?? (result.lang || ''),
+          tokens: result.tokens,
+          timestamps: result.timestamps,
+          durations: result.durations,
+        };
       },
     };
 
@@ -146,7 +153,8 @@ export class TranscriptionPipeline {
       // 预热失败忽略，不影响正常使用
     }
 
-    this.core = new CorePipeline(engine, callbacks);
+    // 提交策略随模型注入：非自回归模型走一致前缀提交，自回归 transducer 走定长分块提交。
+    this.core = new CorePipeline(engine, callbacks, spec.commitStrategy);
   }
 
   /** @param samples 16kHz 单声道 */
