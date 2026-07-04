@@ -46,7 +46,7 @@ function ensure(): Promise<Translator> {
   if (!ready) {
     post({ type: 'status', payload: { state: 'loading' } });
     // 装载：把已下载的本地模型载入内存（未缓存则 init 直接报错，不联网），或云端引擎懒初始化。
-    // 下载不再经子进程，故无字节进度可报——只上报 loading/ready/error 状态。
+    // 本进程只负责装载与推理（下载由主进程的自研下载链路完成），故仅上报 loading/ready/error 状态。
     ready = instance
       .init()
       .then(() => post({ type: 'status', payload: { state: 'ready' } }))

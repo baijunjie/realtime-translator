@@ -33,3 +33,11 @@ export interface SettingsFormData {
 
 /** 通用设置子集（母语/字体/主题）：首次引导向导仅编辑这几项。 */
 export type GeneralFormData = Pick<SettingsFormData, 'nativeLang' | 'fontSize' | 'theme'>;
+
+/** 各界面语言的自称（下拉 label 用），与 UI_LANGS 的 key 一一对应。 */
+export const LANG_LABELS: Record<UiLang, string> = {
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어',
+  zh: '中文',
+};

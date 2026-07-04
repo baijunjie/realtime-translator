@@ -1,7 +1,7 @@
-// 运行时下载本地翻译模型（与 ASR 一致的自研下载链路：注册表声明 URL、按 id 参数化）。
-// 逐个下载 spec.files 到 Transformers.js 缓存布局 `<cacheDir>/<modelId>/<dir>/<filename>`，
-// 之后翻译子进程以 allowRemoteModels=false 离线加载。不再经 Transformers.js 内置联网下载，
-// 也不再绑定当前引擎——下载哪个模型完全由 modelId 决定。
+// 运行时下载本地翻译模型（与 ASR 一致的自研下载链路：注册表声明 URL、按 id 参数化，
+// 下载哪个模型完全由 modelId 决定、与当前翻译引擎设置无关）。逐个下载 spec.files 到
+// Transformers.js 缓存布局 `<cacheDir>/<modelId>/<dir>/<filename>`，之后翻译子进程以
+// allowRemoteModels=false 离线加载。
 import fs from 'node:fs';
 import path from 'node:path';
 import { getTranslationModel, type LocalModelFile } from '@rt/core';
@@ -29,7 +29,17 @@ export async function downloadTranslationModel(
     fs.mkdirSync(path.dirname(localPath(f)), { recursive: true });
   }
 
-  let base = 0; // 已完成文件的累计实收字节
+  // 累计起点计入已存在文件的字节（断点续传只补缺文件）：分母恒为全量近似值，
+  // 不预置的话进度会从 0 只爬到剩余占比、收尾跳变 100%。
+  let base = spec.files
+    .filter((f) => !toDownload.includes(f))
+    .reduce((sum, f) => {
+      try {
+        return sum + fs.statSync(localPath(f)).size;
+      } catch {
+        return sum;
+      }
+    }, 0);
   for (const f of toDownload) {
     let last = 0;
     await downloadFile(f.url, localPath(f), (loaded) => {

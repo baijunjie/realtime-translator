@@ -9,6 +9,9 @@ import type { SetupProgress } from '../shared/types';
 
 /** 指定模型（含公共依赖 VAD）是否齐全（清单来自 @rt/core 的共享登记表）。 */
 export function asrModelsReady(modelsDir: string, modelId: string): boolean {
+  // 未知 id 必须判「未就绪」：requiredAsrFiles 对未知 id 只返回公共依赖 VAD，
+  // 仅按文件存在性判断会误报就绪，随后识别管线构造时才以「未知的识别模型」崩溃。
+  if (!getAsrModel(modelId)) return false;
   return requiredAsrFiles(modelId).every((f) => fs.existsSync(path.join(modelsDir, f)));
 }
 

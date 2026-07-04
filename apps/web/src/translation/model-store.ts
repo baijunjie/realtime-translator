@@ -12,7 +12,6 @@
 //  对 m2m100 下载源与缓存键恰好同为 HF URL；缓存键始终按 modelId 构造成 HF 目录式布局，与下载源无关。
 
 import {
-  hasAllWeightFiles,
   type LocalModelSpec,
   type LocalModelFile,
 } from '@rt/core';
@@ -37,16 +36,20 @@ function cacheKey(modelId: string, file: LocalModelFile): string {
 }
 
 /**
- * 指定本地翻译模型是否已缓存：spec 的全部权重（encoder+decoder）都有对应 .onnx 条目才算就绪
- * —— Cache Storage 按条目逐出，只查任一权重会把部分逐出误判为已就绪。Cache API 不可用或查询异常
- * 时返回 false（宁可多走一次下载页，页内命中缓存会瞬间完成，也不误判为已就绪而在缺模型时跳过下载）。
+ * 指定本地翻译模型是否已缓存（全部文件条目齐备）。Cache API 不可用或查询异常
+ * 时返回 false（宁可多提示一次下载，命中缓存会瞬间完成，也不误判为已就绪而加载失败）。
  */
 export async function isTranslationModelCached(spec: LocalModelSpec): Promise<boolean> {
   if (typeof caches === 'undefined') return false;
   try {
     const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
-    const urls = (await cache.keys()).map((req) => req.url).filter((u) => u.includes(spec.modelId));
-    return hasAllWeightFiles(spec, urls);
+    // spec 的**全部**文件条目都在才算就绪：Cache Storage 按条目逐出，离线加载
+    // （allowRemoteModels=false）缺任一文件（含 tokenizer/config 小文件）都会失败，
+    // 只查权重会把部分逐出误判为已就绪、且就绪后 UI 不再提供补下载入口。
+    const results = await Promise.all(
+      spec.files.map((f) => cache.match(cacheKey(spec.modelId, f))),
+    );
+    return results.every((r) => r !== undefined);
   } catch {
     return false;
   }

@@ -25,7 +25,7 @@ import {
   listSummaries,
   makeArchiveId,
   CloudTranslator,
-  LOCAL_TRANSLATION_MODELS,
+  translationModelsFor,
   DEFAULT_TRANSLATION_MODEL_ID,
   getTranslationModel,
   translateFinalizedSegment,
@@ -376,37 +376,40 @@ export function createWebBridge(): AppBridge {
     // ===== 模型管理页：列出 / 删除本地模型 =====
     async listModels(): Promise<ModelInfo[]> {
       const s = cachedSettings ?? (await readSettingsOnce());
-      const models: ModelInfo[] = [];
-      // ASR：仅列出 platforms 含 web 的模型（sense-voice 及各语言专用模型）。
-      for (const spec of ASR_MODELS) {
-        if (!spec.platforms.includes('web')) continue;
-        const downloaded = await areModelsCached(spec.id);
-        // sizeBytes：已下载时直接用注册表 approxBytes——Cache API 无低成本取真实字节数的途径，
-        // 逐条读 blob 统计会把 ~230MB 拉进内存，得不偿失；未下载为 0。
-        models.push({
-          kind: 'asr',
-          id: spec.id,
-          sizeBytes: downloaded ? spec.approxBytes : 0,
-          downloaded,
-          inUse: s.asr.model === spec.id,
-        });
-      }
-      // 翻译（Transformers.js Cache API 缓存）：注册表驱动（platforms 含 web）。已缓存时用规格近似字节。
-      // iOS/iPadOS 上本地翻译不可用（引擎恒为云端，见 applyPlatformConstraints），整组跳过。
-      if (!isIOS()) {
-        for (const spec of LOCAL_TRANSLATION_MODELS) {
-          if (!spec.platforms.includes('web')) continue;
-          const downloaded = await isTranslationModelCached(spec);
-          models.push({
-            kind: 'translation',
+      // 各模型的缓存探测互相独立，并行执行（避免逐个 await 串行放大 Cache Storage 延迟）。
+      const asrSpecs = ASR_MODELS.filter((spec) => spec.platforms.includes('web'));
+      const asrEntries = Promise.all(
+        asrSpecs.map(async (spec): Promise<ModelInfo> => {
+          const downloaded = await areModelsCached(spec.id);
+          // sizeBytes：已下载时直接用注册表 approxBytes——Cache API 无低成本取真实字节数的途径，
+          // 逐条读 blob 统计会把 ~230MB 拉进内存，得不偿失；未下载为 0。
+          return {
+            kind: 'asr',
             id: spec.id,
-            sizeBytes: downloaded ? spec.approxDownloadBytes : 0,
+            sizeBytes: downloaded ? spec.approxBytes : 0,
             downloaded,
-            inUse: s.translation.engine === spec.id,
-          });
-        }
-      }
-      return models;
+            inUse: s.asr.model === spec.id,
+          };
+        }),
+      );
+      // 翻译（M2M100 系，Transformers.js Cache API 缓存）。同理已缓存时用规格近似字节。
+      // iOS/iPadOS 上本地翻译不可用（引擎恒为云端，见 applyPlatformConstraints），不列该组。
+      const trEntries = isIOS()
+        ? Promise.resolve([] as ModelInfo[])
+        : Promise.all(
+            translationModelsFor('web').map(async (spec): Promise<ModelInfo> => {
+              const downloaded = await isTranslationModelCached(spec);
+              return {
+                kind: 'translation',
+                id: spec.id,
+                sizeBytes: downloaded ? spec.approxDownloadBytes : 0,
+                downloaded,
+                inUse: s.translation.engine === spec.id,
+              };
+            }),
+          );
+      const [asrList, trList] = await Promise.all([asrEntries, trEntries]);
+      return [...asrList, ...trList];
     },
     async deleteModel(kind: ModelKind, id: string): Promise<{ ok: boolean; error?: string }> {
       // 录音进行中拒绝删除（模型正被 worker/内存占用）。

@@ -75,6 +75,9 @@ function totalBytes(modelId: string): number {
 /** 检查指定模型所需文件（含公共依赖 VAD）是否都已在 Cache Storage 中（用于 getSetupStatus）。 */
 export async function areModelsCached(modelId: string): Promise<boolean> {
   if (typeof caches === 'undefined') return false;
+  // 未知 id 必须判「未就绪」：modelFiles 对未知 id 只返回公共依赖 VAD，
+  // 仅按缓存命中判断会误报就绪，随后识别 worker 构造时才以「未知的识别模型」失败。
+  if (!getAsrModel(modelId)) return false;
   try {
     const cache = await caches.open(ASR_MODEL_CACHE_NAME);
     for (const file of modelFiles(modelId)) {

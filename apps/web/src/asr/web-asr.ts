@@ -251,7 +251,12 @@ export class WebAsr {
         finish();
       };
       w.addEventListener('message', onMsg);
-      const timer = setTimeout(finish, 5000); // 兜底：worker 异常时也不挂起
+      // 超时兜底：按重建失败处理（标记带病，调用方冷启动重建）。若仅 resolve 不标记，
+      // 慢机上超过 5s 的重建会被当作已就绪，随后以旧语言的识别器带病开始录音。
+      const timer = setTimeout(() => {
+        this.workerFailed = true;
+        finish();
+      }, 5000);
       w.postMessage({ type: 'reconfigure', language } satisfies ToWorker);
     });
   }

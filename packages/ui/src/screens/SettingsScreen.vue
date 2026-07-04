@@ -55,7 +55,9 @@ const downloadTasks = ref<DownloadTask[]>([]);
 // 否则多次保存的会话里「无 → 本地 → 无」会把引擎记忆回退成打开时的旧值。
 let saveChain: Promise<unknown> = Promise.resolve();
 function persist(): Promise<unknown> {
-  saveChain = saveChain.then(() => {
+  // 链头吞掉上一次保存的失败：单次落盘失败（磁盘/IPC/IndexedDB 异常）不毒化整条链，
+  // 后续修改仍能继续尝试保存；失败本身在链尾记录（不再向 await 方抛出，等待方只关心顺序）。
+  saveChain = saveChain.catch(() => undefined).then(() => {
     const base = settings.value!;
     // 三态映射回持久化：无 → enabled=false（引擎保留原值）；云端 → engine='cloud'；本地 → engine=所选模型 id。
     const enabled = form.translationMode !== 'none';
@@ -74,6 +76,10 @@ function persist(): Promise<unknown> {
       asr: { ...form.asr },
       translation: { ...base.translation, enabled, engine, cloud: { ...form.cloud } },
     });
+  });
+  // 失败在链尾记录并吞掉：await 本链的下载检查等只依赖「保存已按序完成」，不消费失败。
+  saveChain = saveChain.catch((err) => {
+    console.error('[settings:save]', err);
   });
   return saveChain;
 }

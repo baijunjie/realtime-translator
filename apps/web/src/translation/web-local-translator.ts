@@ -1,7 +1,7 @@
 // 浏览器端本地翻译：把 Transformers.js seq2seq 翻译模型的推理放到 Web Worker（见 ./translate-worker），
 // 主线程不被模型推理阻塞。本类是瘦代理：做语言码映射 + 同语言短路 + 简繁 toScript 后处理（都很轻），
 // 实际推理通过消息发给 worker、按 id 对应结果。模型差异全部收敛到传入的 LocalModelSpec（见 @rt/core 注册表）。
-import { M2M100_SPEC, type LocalModelSpec } from '@rt/core';
+import { type LocalModelSpec } from '@rt/core';
 import type { ToTranslateWorker, FromTranslateWorker } from './translate-worker-protocol';
 
 export class WebLocalTranslator {
@@ -13,7 +13,7 @@ export class WebLocalTranslator {
   private warmResolve: (() => void) | null = null;
   private warmReject: ((e: Error) => void) | null = null;
 
-  constructor(private readonly spec: LocalModelSpec = M2M100_SPEC) {}
+  constructor(private readonly spec: LocalModelSpec) {}
 
   /** 取某 app 语言在本模型下的处理项，未知语言回退。 */
   private entry(lang?: string): LocalModelSpec['langs'][string] {

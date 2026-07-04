@@ -1,38 +1,14 @@
-// planTranslation / normalizeZh / hasAllWeightFiles 的单元测试：三端共用的判定逻辑。
+// planTranslation / normalizeZh / 注册表 helper 的单元测试：三端共用的判定逻辑。
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_TRANSLATION_MODEL_ID,
   LOCAL_TRANSLATION_MODELS,
   M2M100_SPEC,
   getTranslationModel,
-  hasAllWeightFiles,
   normalizeZh,
   planTranslation,
   translationModelsFor,
 } from './local-spec';
-
-describe('hasAllWeightFiles 缓存完整性判据', () => {
-  it('encoder + decoder 权重齐全（q8 带 _quantized 后缀）→ 完整', () => {
-    const cached = [
-      'https://huggingface.co/Xenova/m2m100_418M/resolve/main/onnx/encoder_model_quantized.onnx',
-      'https://huggingface.co/Xenova/m2m100_418M/resolve/main/onnx/decoder_model_merged_quantized.onnx',
-      'https://huggingface.co/Xenova/m2m100_418M/resolve/main/tokenizer.json',
-    ];
-    expect(hasAllWeightFiles(M2M100_SPEC, cached)).toBe(true);
-  });
-
-  it('只剩 encoder（decoder 被逐出）→ 不完整', () => {
-    expect(hasAllWeightFiles(M2M100_SPEC, ['encoder_model_quantized.onnx'])).toBe(false);
-  });
-
-  it('只有非权重文件（tokenizer/config）→ 不完整', () => {
-    expect(hasAllWeightFiles(M2M100_SPEC, ['tokenizer.json', 'config.json'])).toBe(false);
-  });
-
-  it('空列表 → 不完整', () => {
-    expect(hasAllWeightFiles(M2M100_SPEC, [])).toBe(false);
-  });
-});
 
 describe('本地翻译模型注册表', () => {
   it('默认模型存在于注册表且为本地全平台可用（macos + web）', () => {
@@ -50,7 +26,10 @@ describe('本地翻译模型注册表', () => {
     for (const m of LOCAL_TRANSLATION_MODELS) {
       expect(m.nameKey).toMatch(/^models\./);
       expect(m.platforms.length).toBeGreaterThan(0);
-      expect(m.weightFiles).toEqual(['encoder_model', 'decoder_model']);
+      // 离线加载所需的 seq2seq 双权重必须在 files 清单内（q8 档带 _quantized 后缀）。
+      const names = m.files.map((f) => f.filename).join(' ');
+      expect(names).toContain('encoder_model_quantized.onnx');
+      expect(names).toContain('decoder_model_merged_quantized.onnx');
     }
   });
 
@@ -67,9 +46,10 @@ describe('本地翻译模型注册表', () => {
         expect(f.url).toContain('github.com/baijunjie/realtime-translator/releases/download/models-v1/');
         expect(f.url.endsWith(f.filename)).toBe(true);
       }
-      // spec.files 里的 .onnx 文件名整体覆盖 weightFiles 判据（离线加载所需权重齐全）。
-      const cachedNames = m.files.map((f) => (f.dir ? `${f.dir}/${f.filename}` : f.filename));
-      expect(hasAllWeightFiles(m, cachedNames)).toBe(true);
+      // 离线加载所需的 seq2seq 双权重必须在 files 清单内（q8 档带 _quantized 后缀）。
+      const names = m.files.map((f) => f.filename).join(' ');
+      expect(names).toContain('encoder_model_quantized.onnx');
+      expect(names).toContain('decoder_model_merged_quantized.onnx');
     }
   });
 

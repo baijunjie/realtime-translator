@@ -2,22 +2,16 @@
 import { computed, watch } from 'vue';
 import { NSelect, NFormItem } from 'naive-ui';
 import { useI18n } from 'vue-i18n';
-import { UI_LANGS, asrModelsFor, DEFAULT_ASR_MODEL_ID, type AsrLang, type UiLang } from '@rt/core';
+import { UI_LANGS, asrModelsFor, DEFAULT_ASR_MODEL_ID, type AsrLang } from '@rt/core';
 import { bridge } from '../../bridge';
 import { humanBytes } from '../../utils/bytes';
+import { LANG_LABELS } from './form';
 import type { SettingsFormData } from './form';
 
 const { t } = useI18n();
 // 父组件持有 reactive 表单对象，子组件直接修改其字段
 const props = defineProps<{ form: SettingsFormData }>();
 
-// 识别语言下拉 label 用各语言的自称（en/ja/ko/zh）。
-const LANG_LABELS: Record<UiLang, string> = {
-  en: 'English',
-  ja: '日本語',
-  ko: '한국어',
-  zh: '中文',
-};
 
 // —— 语音识别：识别语言 + 识别模型 ——
 // 识别语言下拉：auto 置顶，其余 en/ja/ko/zh 字母序（复用 UI_LANGS 顺序）。

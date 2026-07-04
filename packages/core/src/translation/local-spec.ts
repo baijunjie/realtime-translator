@@ -59,11 +59,6 @@ export interface LocalModelSpec {
   /** 量化档位 */
   dtype: 'q8';
   /**
-   * 缓存完整性判据：每个特征串须命中至少一个已缓存的 .onnx 权重文件（见 hasAllWeightFiles）。
-   * 缓存按文件粒度写入/逐出，只查目录或任一文件存在会把部分缺失误判为已就绪。
-   */
-  weightFiles: string[];
-  /**
    * 该模型全部需下载文件（权重 + tokenizer/config）。自研下载器按此逐个下载，落入
    * Transformers.js 缓存布局后离线加载。清单以本机真实缓存为准枚举，缺任一文件都会导致离线加载失败。
    */
@@ -79,11 +74,6 @@ export interface LocalModelSpec {
   fallbackLang: string;
   /** 支持该模型的平台（如 iOS 走系统翻译、不消费本地权重，故不列入）。 */
   platforms: Platform[];
-}
-
-/** 已缓存文件名/URL 列表是否覆盖 spec 的全部权重文件（每个特征串命中至少一个 .onnx） */
-export function hasAllWeightFiles(spec: LocalModelSpec, cached: string[]): boolean {
-  return spec.weightFiles.every((w) => cached.some((f) => f.includes(w) && f.includes('.onnx')));
 }
 
 // M2M100-418M（MIT，轻量）。产出中文统一归一化为简体字形。
@@ -120,8 +110,6 @@ export const M2M100_SPEC: LocalModelSpec = {
   nameKey: 'models.m2m100',
   modelId: M2M100_REPO,
   dtype: 'q8',
-  // seq2seq 双权重：encoder + merged decoder（q8 档文件名带 _quantized 后缀，用特征串匹配）
-  weightFiles: ['encoder_model', 'decoder_model'],
   // 文件清单以本机真实缓存为准枚举（Transformers.js q8 档实际拉取的完整集合）：4 个 tokenizer/config
   // 小文件 + onnx/ 下的量化 encoder/decoder。按体积升序排列（小文件先下，早暴露连接问题）。
   files: [
@@ -150,7 +138,6 @@ export const M2M100_1_2B_SPEC: LocalModelSpec = {
   nameKey: 'models.m2m100_1_2b',
   modelId: 'realtime-translator/m2m100_1.2B',
   dtype: 'q8',
-  weightFiles: ['encoder_model', 'decoder_model'],
   files: [
     m2m1002bFile('', 'config.json'),
     m2m1002bFile('', 'generation_config.json'),

@@ -89,7 +89,7 @@ export function withDefaults(raw: unknown, defaults: AppSettings): AppSettings {
         t.engine === 'cloud'
           ? 'cloud'
           : typeof t.engine === 'string' && getTranslationModel(t.engine)
-            ? getTranslationModel(t.engine)!.id
+            ? (t.engine as AppSettings['translation']['engine'])
             : DEFAULT_TRANSLATION_MODEL_ID,
       cloud: {
         baseURL: (cloud.baseURL as string) || d.translation.cloud.baseURL,

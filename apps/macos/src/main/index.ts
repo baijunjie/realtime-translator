@@ -325,9 +325,12 @@ function startAsrChild(): Promise<void> {
           sendToRenderer('pipeline:status', { state: 'error', error: `识别进程异常退出 (${code})`, code: 'asr-crashed' });
         }
       }
-      if (code !== 0 && !settled) {
+      // 初始化未完成即退出（含 reconfigure/删模型在冷加载途中主动 kill 的 code 0）：
+      // 必须 settle，否则 ensureAsr 的等待者（prewarm/start）永久悬挂，
+      // prewarm 的 finally 不再发 stopped 终态、录音按钮一直停在加载中。
+      if (!settled) {
         settled = true;
-        reject(new Error(`识别进程退出 ${code}`));
+        reject(new Error(`识别进程退出 (${code})`));
       }
     });
     child.postMessage({ type: 'init', modelsDir: MODELS_DIR, modelId: asr.model, language: asr.language });
@@ -467,7 +470,7 @@ ipcMain.handle('models:list', (): ModelInfo[] => {
       kind: 'asr',
       id: spec.id,
       sizeBytes,
-      downloaded: requiredAsrFiles(spec.id).every((rel) => fs.existsSync(path.join(MODELS_DIR, rel))),
+      downloaded: asrModelsReady(MODELS_DIR, spec.id),
       inUse: settings.asr.model === spec.id,
     });
   }
