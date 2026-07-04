@@ -310,6 +310,15 @@ export function createIosBridge(): AppBridge {
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
     },
+    async cancelModelDownload(kind: ModelKind, id: string): Promise<void> {
+      // iOS 仅 ASR 有自研下载可取消（翻译走系统翻译，无下载）。中止在途 + 删除该模型残留。
+      if (kind !== 'asr') return;
+      try {
+        await RealtimeAsr.cancelDownload({ id });
+      } catch {
+        /* 无原生壳/未在途：忽略 */
+      }
+    },
 
     // ===== 归档（Preferences）=====
     async saveArchive(name: string, lines: ArchiveLine[]): Promise<ArchiveSummary[]> {

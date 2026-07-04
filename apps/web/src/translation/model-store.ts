@@ -66,6 +66,7 @@ export async function isTranslationModelCached(spec: LocalModelSpec): Promise<bo
 export async function ensureTranslationModelCached(
   spec: LocalModelSpec,
   onProgress?: (p: DownloadProgress) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (typeof caches === 'undefined') {
     throw new Error('Cache Storage 不可用，无法缓存翻译模型');
@@ -75,13 +76,21 @@ export async function ensureTranslationModelCached(
   let base = 0; // 已完成文件的累计实收字节
 
   for (const file of spec.files) {
+    // 用户取消：不再开始下一个文件，直接抛出中止（已完成文件由 cancelModelDownload 整体删除兜底）。
+    if (signal?.aborted) throw new DOMException('下载已取消', 'AbortError');
     const key = cacheKey(spec.modelId, file);
     if (await cache.match(key)) continue; // 已缓存：跳过（其字节份额由收尾贴满兜底）
     let last = 0;
-    await downloadIntoCache(cache, key, file, (received) => {
-      last = received;
-      onProgress?.({ loaded: Math.min(base + received, total), total });
-    });
+    await downloadIntoCache(
+      cache,
+      key,
+      file,
+      (received) => {
+        last = received;
+        onProgress?.({ loaded: Math.min(base + received, total), total });
+      },
+      signal,
+    );
     base += last;
   }
 
@@ -120,6 +129,7 @@ async function downloadIntoCache(
   key: string,
   file: LocalModelFile,
   onFileProgress: (received: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const urls = file.webUrls;
   if (urls.length === 0) {
@@ -128,9 +138,11 @@ async function downloadIntoCache(
   const errors: string[] = [];
   for (const url of urls) {
     try {
-      await fetchIntoCache(cache, key, url, file, onFileProgress);
+      await fetchIntoCache(cache, key, url, file, onFileProgress, signal);
       return;
     } catch (err) {
+      // 用户取消：立即停止，不再尝试后续源。
+      if (signal?.aborted) throw err;
       errors.push(`${url} → ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -149,6 +161,7 @@ async function fetchIntoCache(
   url: string,
   file: LocalModelFile,
   onFileProgress: (received: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const controller = new AbortController();
   let stalled = false;
@@ -160,6 +173,13 @@ async function fetchIntoCache(
       controller.abort();
     }, STALL_TIMEOUT_MS);
   };
+
+  // 用户取消（外部 signal）与内部停滞看门狗合流：外部 abort 触发内部 controller.abort()。
+  const onExternalAbort = (): void => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
 
   armWatchdog(); // 连接/响应头阶段也受同一 signal 约束
   try {
@@ -203,9 +223,11 @@ async function fetchIntoCache(
       throw err;
     }
   } catch (err) {
-    if (stalled) throw new Error(`下载停滞，请检查网络后重试: ${file.filename}`);
+    // 外部取消（signal.aborted）不改文案，按 AbortError 原样上抛，由上层识别为取消。
+    if (stalled && !signal?.aborted) throw new Error(`下载停滞，请检查网络后重试: ${file.filename}`);
     throw err;
   } finally {
     if (watchdog !== undefined) clearTimeout(watchdog);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
 }

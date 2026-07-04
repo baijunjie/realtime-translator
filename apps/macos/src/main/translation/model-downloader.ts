@@ -17,7 +17,8 @@ import type { SetupProgress } from '../../shared/types';
 export async function downloadTranslationModel(
   cacheDir: string,
   modelId: string,
-  onProgress: (p: SetupProgress) => void
+  onProgress: (p: SetupProgress) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   const spec = getTranslationModel(modelId);
   if (!spec) throw new Error(`未知的翻译模型: ${modelId}`);
@@ -41,12 +42,19 @@ export async function downloadTranslationModel(
       }
     }, 0);
   for (const f of toDownload) {
+    // 用户取消：不再开始下一个文件（在途文件由 downloadFile 中止清理，已完成文件由 cancel 整体删除）。
+    if (signal?.aborted) throw new Error('下载已取消');
     let last = 0;
-    await downloadFile(f.nativeUrls, localPath(f), (loaded) => {
-      last = loaded;
-      // 实收字节可能略超近似分母（q8 实际略大于估值）：封顶到 total，避免进度条越界。
-      onProgress({ loaded: Math.min(base + loaded, total), total });
-    });
+    await downloadFile(
+      f.nativeUrls,
+      localPath(f),
+      (loaded) => {
+        last = loaded;
+        // 实收字节可能略超近似分母（q8 实际略大于估值）：封顶到 total，避免进度条越界。
+        onProgress({ loaded: Math.min(base + loaded, total), total });
+      },
+      signal
+    );
     base += last;
   }
   // 末尾对齐 100%：各文件实收合计与近似分母有出入，收尾时把进度贴到满格。

@@ -11,7 +11,8 @@ import GeneralSection from '../components/settings/GeneralSection.vue';
 import AsrSection from '../components/settings/AsrSection.vue';
 import TranslationSection from '../components/settings/TranslationSection.vue';
 import ModelsSection from '../components/settings/ModelsSection.vue';
-import ModelDownloadModal, { type DownloadTask } from '../components/ModelDownloadModal.vue';
+import ModelDownloadModal from '../components/ModelDownloadModal.vue';
+import { type DownloadTask, startDownloads } from '../composables/useModelDownloads';
 
 const { t } = useI18n();
 const emit = defineEmits<{ close: [] }>();
@@ -164,9 +165,9 @@ watch(
   },
 );
 
-// 下载完成 → 仅关闭弹窗（设置早已生效，不离开设置页）
-function onDownloadDone(): void {
-  downloadModalOpen.value = false;
+// 确认下载 → 转后台下载（设置早已生效，不离开设置页；进度/取消在「模型管理」页行内呈现）
+function onDownloadConfirm(tasks: DownloadTask[]): void {
+  startDownloads(tasks);
 }
 </script>
 
@@ -233,12 +234,12 @@ function onDownloadDone(): void {
       </div>
     </div>
 
-    <!-- 选择识别模型/本地翻译引擎时的就地下载：done 仅关闭弹窗；
-         cancel 不回退设置（值已落盘），缺失模型留到点击录音时再按需下载 -->
+    <!-- 选择识别模型/本地翻译引擎时的就地下载：确认后转后台下载（进度在「模型管理」页行内呈现）；
+         取消不回退设置（值已落盘），缺失模型留到点击录音时再按需下载 -->
     <model-download-modal
       v-model:show="downloadModalOpen"
       :tasks="downloadTasks"
-      @done="onDownloadDone"
+      @confirm="onDownloadConfirm"
     />
   </div>
 </template>

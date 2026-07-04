@@ -18,6 +18,9 @@ const messages = {
       downloading: 'Downloading…',
       failed: 'Download failed. Check your network and retry.',
       giveUp: 'Give up',
+      recordWaitDesc:
+        'Recording starts automatically once ready. Canceling stops this recording only — the download keeps running in the background.',
+      cancelRecording: 'Cancel recording',
       retry: 'Retry',
       start: 'Download',
       step: 'Item {n} of {total}',
@@ -80,6 +83,7 @@ const messages = {
     },
     modelsScreen: {
       asrGroup: 'Speech recognition models',
+      cancelDownload: 'Cancel download',
       delete: 'Delete',
       deleteConfirm: 'Delete this model?',
       deleteInUseWarn:
@@ -152,6 +156,9 @@ const messages = {
       downloading: 'ダウンロード中…',
       failed: 'ダウンロードに失敗しました。ネットワークを確認して再試行してください。',
       giveUp: '中止',
+      recordWaitDesc:
+        '準備が整うと録音が自動で始まります。キャンセルしても今回の録音を取りやめるだけで、ダウンロードはバックグラウンドで続行します。',
+      cancelRecording: '録音をキャンセル',
       retry: '再試行',
       start: 'ダウンロード',
       step: '{total} 件中 {n} 件目',
@@ -214,6 +221,7 @@ const messages = {
     },
     modelsScreen: {
       asrGroup: '音声認識モデル',
+      cancelDownload: 'ダウンロードを中止',
       delete: '削除',
       deleteConfirm: 'このモデルを削除しますか？',
       deleteInUseWarn: 'このモデルは使用中です。次回の録音前に再ダウンロードが必要になります。',
@@ -285,6 +293,9 @@ const messages = {
       downloading: '다운로드 중…',
       failed: '다운로드 실패. 네트워크를 확인하고 다시 시도하세요.',
       giveUp: '중단',
+      recordWaitDesc:
+        '준비가 되면 녹음이 자동으로 시작됩니다. 취소해도 이번 녹음만 중단되고 다운로드는 백그라운드에서 계속됩니다.',
+      cancelRecording: '녹음 취소',
       retry: '다시 시도',
       start: '다운로드',
       step: '{total}개 중 {n}번째',
@@ -347,6 +358,7 @@ const messages = {
     },
     modelsScreen: {
       asrGroup: '음성 인식 모델',
+      cancelDownload: '다운로드 취소',
       delete: '삭제',
       deleteConfirm: '이 모델을 삭제할까요?',
       deleteInUseWarn: '이 모델은 사용 중입니다. 다음 녹음 전에 다시 다운로드해야 합니다.',
@@ -416,6 +428,8 @@ const messages = {
       downloading: '下载中…',
       failed: '下载失败，请检查网络后重试。',
       giveUp: '放弃',
+      recordWaitDesc: '下载完成后自动开始录音。取消只会中止本次录音，下载会在后台继续。',
+      cancelRecording: '取消录音',
       retry: '重试',
       start: '开始下载',
       step: '第 {n}/{total} 项',
@@ -478,6 +492,7 @@ const messages = {
     },
     modelsScreen: {
       asrGroup: '语音识别模型',
+      cancelDownload: '取消下载',
       delete: '删除',
       deleteConfirm: '确定删除该模型？',
       deleteInUseWarn: '该模型正在使用中，删除后下次录音需重新下载。',

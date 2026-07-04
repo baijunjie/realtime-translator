@@ -18,13 +18,13 @@ Try it now in your browser: **https://baijunjie.github.io/realtime-translator/**
   - **Cloud** (optional): any OpenAI-compatible endpoint (set Base URL / API Key / Model in Settings; the key is stored only on your device) — enabling it means text is sent to a third party
 - Archive conversations — save a session and reopen it later
 - Settings: native language, recognition language & model, audio source, transcript font size, theme, translation method; a "Manage models" tab lists / downloads / deletes each model (the build version is shown at the bottom)
-- On-demand model downloads — hitting Start (or selecting a not-yet-downloaded model in Settings) pops a confirmation listing the model names and sizes; after you confirm it downloads behind a single byte-progress bar and continues automatically once done. Already-downloaded models preload when the app opens, so hitting Start begins recording instantly
+- On-demand model downloads — hitting Start (or selecting a not-yet-downloaded model in Settings) pops a confirmation listing the model names and sizes; after you confirm, the download runs in the background (multiple models download in parallel) so the UI stays usable. In "Manage models" each downloading model shows an inline progress bar with a cancel (✕) button — canceling stops it and removes the partial download. Already-downloaded models preload when the app opens, so hitting Start begins recording instantly
 - Runs in real time on CPU (RTF ≈ 0.03 on Apple Silicon), no GPU required
 
 ## Usage
 
 1. **First launch** — choose your native language on the onboarding screen.
-2. Click **Start Recording** — if the selected recognition model isn't downloaded yet, a confirmation appears first (listing the model names and sizes); once you confirm and it finishes, recording starts automatically and captions appear live as you speak.
+2. Click **Start Recording** — if the selected recognition model isn't downloaded yet, a confirmation appears first (listing the model names and sizes); after you confirm, a progress dialog shows the download and recording starts automatically once the model is ready. You can cancel the recording from that dialog while the download keeps running in the background.
 3. Pick a **translation method** in Settings (local model / cloud / off) — a translation into your language appears under each line. Enabling a local translation model shows the same download confirmation first (e.g. M2M-100, ~640 MB).
 4. Open **Settings** (⚙) to change language, recognition language & model, audio source, font size, theme, or translation method (and cloud credentials); a "Manage models" tab lets you view, download, or delete each model.
 
@@ -53,7 +53,7 @@ pnpm --filter @rt/web dev   # run the browser PWA dev server (→ @rt/web)
 
 For iOS, see `apps/ios/native-plugin/INTEGRATION.md` (the native plugin must be wired into a Capacitor iOS host; it needs the Xcode toolchain and a real device for the Translation framework).
 
-On macOS/web, recognition and local translation models both download on demand: the first time you hit Start Recording — or select a not-yet-downloaded model in Settings — a confirmation appears, then the download runs.
+On macOS/web, recognition and local translation models both download on demand: the first time you hit Start Recording — or select a not-yet-downloaded model in Settings — a confirmation appears, then the download runs in the background (inline progress bar + cancel in "Manage models").
 
 Other scripts: `pnpm build`, `pnpm type-check`. Per-package: `pnpm --filter @rt/macos <script>` (e.g. `clean`, `test-translate`).
 

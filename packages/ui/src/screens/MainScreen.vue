@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, h, watch } from 'vue';
-import { NButton, NModal, NInput, NDropdown, NTooltip } from 'naive-ui';
+import { computed, ref, h, watch, onUnmounted } from 'vue';
+import { NButton, NModal, NInput, NDropdown, NTooltip, NProgress } from 'naive-ui';
 import type { DropdownMixedOption } from 'naive-ui/es/dropdown/src/interface';
 import { Settings, Trash2, Archive, Library, Eraser, LoaderCircle, TriangleAlert, MoreHorizontal, Mic, MonitorSpeaker, Square, RefreshCw } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
@@ -20,7 +20,15 @@ import {
   translationError,
 } from '../composables/useTranscription';
 import TranscriptList from '../components/TranscriptList.vue';
-import ModelDownloadModal, { type DownloadTask } from '../components/ModelDownloadModal.vue';
+import ModelDownloadModal from '../components/ModelDownloadModal.vue';
+import {
+  type DownloadTask,
+  startDownloads,
+  onDownloadDone,
+  isDownloading,
+  percentOf,
+  downloadEntry,
+} from '../composables/useModelDownloads';
 import { fmtDateTime } from '../utils/datetime';
 import { bridge } from '../bridge';
 
@@ -178,22 +186,21 @@ const showMicModal = computed({
   },
 });
 
-// 按需下载弹窗：录音前汇总缺失模型，确认后逐个下载，完成再继续启动流程。
+// 按需下载：确认弹窗仅征询体积，确认后转后台下载；主屏进「等待下载」态显示进度、可终止本次录音
+// （下载后台继续）；所等模型全部下完自动开始录音。
 const downloadModalOpen = ref(false);
-const downloadTasks = ref<DownloadTask[]>([]);
+const downloadTasks = ref<DownloadTask[]>([]); // 确认弹窗里展示 + 待启动的新下载任务
+const pendingTasks = ref<DownloadTask[]>([]); // 本次录音要等待的全部缺失模型（含已在后台下的）
 
-// 录音按钮：停止无需检查；开始前先汇总缺失模型（缺则弹下载弹窗），再走音源对应的权限/启动流程。
-async function onRecordClick(): Promise<void> {
-  // 启停在途一律忽略，按钮同时也已禁用
-  if (recordBusy.value) return;
-  if (recording.value) {
-    toggleRecording();
-    return;
-  }
+// 等待下载态：用户点了录音、模型正在（后台）下载，主屏显示进度并可终止本次录音。
+const awaitingRecord = ref(false);
+let offAwaitDone: (() => void) | null = null;
+
+// 汇总当前设置下录音所需但未就绪的模型下载任务。
+async function collectMissingTasks(): Promise<DownloadTask[]> {
   const s = settings.value;
-  if (!s) return;
+  if (!s) return [];
   const tasks: DownloadTask[] = [];
-  // ASR 模型：当前选中的识别模型未就绪则加下载任务
   try {
     const { asrReady } = await bridge().getSetupStatus(s.asr.model);
     if (!asrReady) {
@@ -203,7 +210,6 @@ async function onRecordClick(): Promise<void> {
   } catch {
     /* 查询失败不拦截，按已就绪继续 */
   }
-  // 本地翻译模型：开启翻译且用本地引擎、桥接需自行下载且未就绪时加下载任务（按引擎 id，此时必为本地 id）
   const getTrStatus = bridge().getTranslationSetupStatus;
   const trSpec = s.translation.engine !== 'cloud' ? getTranslationModel(s.translation.engine) : undefined;
   if (s.translation.enabled && trSpec && getTrStatus && bridge().downloadTranslationModel) {
@@ -214,18 +220,87 @@ async function onRecordClick(): Promise<void> {
       /* 查询失败不拦截，按已就绪继续 */
     }
   }
-  if (tasks.length) {
-    // 有缺失：弹下载弹窗，done 后自动继续、cancel 则终止（不录音）
-    downloadTasks.value = tasks;
+  return tasks;
+}
+
+// 录音按钮：等待下载中→终止本次录音（下载后台续）；录音中→停止；否则汇总缺失模型（有则先下）。
+async function onRecordClick(): Promise<void> {
+  if (recordBusy.value || awaitingRecord.value) return; // 等待态由进度模态承载，按钮此时不响应
+  if (recording.value) {
+    toggleRecording();
+    return;
+  }
+  const tasks = await collectMissingTasks();
+  if (!tasks.length) {
+    await proceedToRecord();
+    return;
+  }
+  // 已在后台下载的不必再确认；仅未开始的需弹确认窗。全部已在下 → 直接进等待（进度模态）。
+  const toStart = tasks.filter((tk) => !isDownloading(tk.kind, tk.modelId));
+  if (toStart.length) {
+    pendingTasks.value = tasks;
+    downloadTasks.value = toStart;
     downloadModalOpen.value = true;
     return;
   }
-  await proceedToRecord();
+  beginAwait(tasks);
 }
 
-// 下载完成后自动继续启动录音；下载取消则不录音。
-function onDownloadDone(): void {
-  void proceedToRecord();
+// 确认后台下载：启动新任务并进入等待态（等全部所需模型下完自动录音）。
+function onDownloadConfirm(toStart: DownloadTask[]): void {
+  startDownloads(toStart);
+  beginAwait(pendingTasks.value.length ? pendingTasks.value : toStart);
+}
+
+// 进入等待态：订阅所等任务的完成——全部成功→自动开始录音；任一失败→退出等待并提示。
+function beginAwait(tasks: DownloadTask[]): void {
+  const remaining = new Set(tasks.map((tk) => `${tk.kind}:${tk.modelId}`));
+  pendingTasks.value = tasks; // 进度模态据此列出所等模型（含「已在后台下」直接进等待的路径）
+  awaitingRecord.value = true;
+  offAwaitDone?.();
+  offAwaitDone = onDownloadDone((task, ok) => {
+    if (!awaitingRecord.value) return;
+    const k = `${task.kind}:${task.modelId}`;
+    if (!remaining.has(k)) return;
+    if (!ok) {
+      // 失败或被取消：退出等待，提示下载失败（用户可到模型管理重试）。
+      stopAwait();
+      errorText.value = t('download.failed');
+      errorCode.value = null;
+      return;
+    }
+    remaining.delete(k);
+    if (remaining.size === 0) {
+      stopAwait();
+      void proceedToRecord();
+    }
+  });
+}
+
+// 退出等待态（不影响后台下载）。
+function stopAwait(): void {
+  awaitingRecord.value = false;
+  pendingTasks.value = [];
+  offAwaitDone?.();
+  offAwaitDone = null;
+}
+
+// 切屏卸载时反注册等待订阅，避免后台下载完成误触发已离开的录音等待。
+onUnmounted(() => offAwaitDone?.());
+
+// 进度模态里每个所等模型的进度：下载中取实时百分比，已下完（仍在等其它模型）显示 100%。
+function awaitTaskName(task: DownloadTask): string {
+  const spec = task.kind === 'asr' ? getAsrModel(task.modelId) : getTranslationModel(task.modelId);
+  return spec ? t(spec.nameKey) : task.modelId;
+}
+function awaitTaskPercent(task: DownloadTask): number {
+  return isDownloading(task.kind, task.modelId) ? percentOf(task.kind, task.modelId) : 100;
+}
+function awaitTaskIndeterminate(task: DownloadTask): boolean {
+  return (
+    isDownloading(task.kind, task.modelId) &&
+    (downloadEntry(task.kind, task.modelId)?.total ?? 0) === 0
+  );
 }
 
 // 系统音频权限说明弹窗：CoreAudio Tap 无权限查询 API，无法像麦克风那样按状态分流——
@@ -366,7 +441,7 @@ function openMicSettings(): void {
         </n-tooltip>
         <n-button
           :type="recording ? 'error' : 'primary'"
-          :disabled="preparing || recordBusy"
+          :disabled="preparing || recordBusy || awaitingRecord"
           :loading="recordBusy"
           @click="onRecordClick"
         >
@@ -463,12 +538,44 @@ function openMicSettings(): void {
       </template>
     </n-modal>
 
-    <!-- 录音前的按需模型下载弹窗：done 后自动继续启动，cancel 则不录音 -->
+    <!-- 录音前的按需模型下载确认弹窗：确认后转后台下载 + 进等待态，取消则不录音 -->
     <model-download-modal
       v-model:show="downloadModalOpen"
       :tasks="downloadTasks"
-      @done="onDownloadDone"
+      @confirm="onDownloadConfirm"
     />
+
+    <!-- 录音等待下载：进度模态，展示所等模型各自进度；可取消本次录音（下载后台继续）；下完自动开始录音 -->
+    <n-modal
+      :show="awaitingRecord"
+      preset="card"
+      :title="t('download.titleDownloading')"
+      style="width: 460px; max-width: 90vw"
+      :closable="false"
+      :mask-closable="false"
+      :close-on-esc="false"
+    >
+      <p class="mb-3 text-sm text-neutral-500 dark:text-neutral-400">{{ t('download.recordWaitDesc') }}</p>
+      <div v-for="task in pendingTasks" :key="`${task.kind}:${task.modelId}`" class="mb-3">
+        <div class="mb-1 flex items-center justify-between gap-2 text-sm">
+          <span class="min-w-0 truncate">{{ awaitTaskName(task) }}</span>
+          <span
+            v-if="!awaitTaskIndeterminate(task)"
+            class="shrink-0 tabular-nums text-neutral-500 dark:text-neutral-400"
+          >{{ awaitTaskPercent(task) }}%</span>
+        </div>
+        <n-progress
+          type="line"
+          :percentage="awaitTaskPercent(task)"
+          :show-indicator="false"
+          :height="8"
+          :processing="awaitTaskIndeterminate(task)"
+        />
+      </div>
+      <div class="mt-5 flex justify-end">
+        <n-button @click="stopAwait">{{ t('download.cancelRecording') }}</n-button>
+      </div>
+    </n-modal>
 
     <!-- bottom 计入 safe-area，避开 Home 指示条 -->
     <n-tooltip>
@@ -477,7 +584,7 @@ function openMicSettings(): void {
           class="fixed left-1/2 z-20 flex h-16 w-16 -translate-x-1/2 items-center justify-center rounded-full text-white shadow-lg transition-colors disabled:opacity-40 sm:hidden"
           :class="recording ? 'bg-red-500 active:bg-red-600' : 'bg-emerald-500 active:bg-emerald-600'"
           :style="{ bottom: 'calc(env(safe-area-inset-bottom) + 22px)' }"
-          :disabled="preparing || recordBusy"
+          :disabled="preparing || recordBusy || awaitingRecord"
           :aria-label="recording ? t('main.stop') : t('main.start')"
           @click="onRecordClick"
         >

@@ -116,6 +116,10 @@ export function createWebBridge(): AppBridge {
   const translationStatusCb = createCallbackHub<TranslationStatusPayload>();
   const setupProgressCb = createCallbackHub<SetupProgress>();
 
+  // 各模型在途下载的中止句柄（后台并行下载 + 按模型取消用），键为 `${kind}:${id}`。
+  // cancelModelDownload 只 abort 对应模型的在途 fetch；下载结束时删除自身条目。
+  const downloadAborts = new Map<string, AbortController>();
+
   // —— 缓存设置：翻译热路径（segment 到达）同步读开关/引擎/母语，免得每段都 await IndexedDB。
   //    翻译开关就是 cachedSettings.translation.enabled，改后即时生效并落盘，不再另存一份布尔。 ——
   let cachedSettings: AppSettings | null = null;
@@ -371,13 +375,23 @@ export function createWebBridge(): AppBridge {
     async downloadAsrModels(modelId: string): Promise<{ ok: boolean; error?: string }> {
       // 按 @rt/core 注册表下载指定模型的 Silero VAD + 模型文件到 Cache Storage，
       // 边下边通过 setupProgressCb 回吐 { loaded, total } 聚合进度。首次后命中缓存即秒回。
+      // 挂 AbortController 支持后台取消（cancelModelDownload），按模型键索引以支持并行。
+      const key = `asr:${modelId}`;
+      const abort = new AbortController();
+      downloadAborts.set(key, abort);
       try {
-        await ensureModelsCached(modelId, (p) =>
-          setupProgressCb.emit({ loaded: p.loaded, total: p.total }),
+        await ensureModelsCached(
+          modelId,
+          (p) => setupProgressCb.emit({ kind: 'asr', id: modelId, loaded: p.loaded, total: p.total }),
+          abort.signal,
         );
         return { ok: true };
       } catch (e) {
+        // 用户取消（signal aborted）：返回失败但带 cancelled 语义；管理器凭自身取消标记区分。
+        if (abort.signal.aborted) return { ok: false, error: 'cancelled' };
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      } finally {
+        if (downloadAborts.get(key) === abort) downloadAborts.delete(key);
       }
     },
 
@@ -470,13 +484,36 @@ export function createWebBridge(): AppBridge {
       if (!spec || !spec.platforms.includes('web')) {
         return { ok: false, error: '未知的翻译模型' };
       }
+      const key = `translation:${modelId}`;
+      const abort = new AbortController();
+      downloadAborts.set(key, abort);
       try {
-        await ensureTranslationModelCached(spec, (p) =>
-          setupProgressCb.emit({ loaded: p.loaded, total: p.total }),
+        await ensureTranslationModelCached(
+          spec,
+          (p) => setupProgressCb.emit({ kind: 'translation', id: modelId, loaded: p.loaded, total: p.total }),
+          abort.signal,
         );
         return { ok: true };
       } catch (e) {
+        if (abort.signal.aborted) return { ok: false, error: 'cancelled' };
         return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      } finally {
+        if (downloadAborts.get(key) === abort) downloadAborts.delete(key);
+      }
+    },
+    async cancelModelDownload(kind, id): Promise<void> {
+      // 只中止该模型的在途下载（并行下载互不影响），并删除其全部残留（在途文件由 fetchIntoCache 中止时删条目、
+      // 已完成文件在此整体删除），回到未下载态。非在途时仅做清理（安全 no-op）。
+      downloadAborts.get(`${kind}:${id}`)?.abort();
+      try {
+        if (kind === 'asr') {
+          await deleteAsrModelFromCache(id);
+        } else {
+          const spec = getTranslationModel(id);
+          if (spec) await deleteTranslationModelFromCache(spec);
+        }
+      } catch {
+        /* 清理失败忽略：listModels 刷新会反映真实缓存状态 */
       }
     },
 

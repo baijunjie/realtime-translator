@@ -85,6 +85,10 @@ let translateChild: TranslateChild | null = null;
 // 避免并发写同一缓存目录。下载走自研链路（downloadTranslationModel），与翻译子进程无关。
 const translationDownloads = new Map<string, Promise<{ ok: boolean; error?: string }>>();
 
+// 各模型在途下载的中止句柄（后台并行下载 + 按模型取消用），键为 `${kind}:${id}`。
+// models:cancel-download 只 abort 对应模型；下载结束时删除自身条目。
+const downloadAborts = new Map<string, AbortController>();
+
 // 当前选中的本地翻译模型 spec（引擎为 cloud 或未知本地 id 时无）。
 function currentTranslationSpec(): LocalModelSpec | undefined {
   const engine = loadSettings().translation.engine;
@@ -442,11 +446,23 @@ ipcMain.handle('setup:get-status', (_event, modelId: string): SetupStatus => ({
 ipcMain.handle(
   'setup:download-asr',
   async (_event, modelId: string): Promise<{ ok: boolean; error?: string }> => {
+    // 挂 AbortController 支持后台取消（models:cancel-download），按模型键索引以支持并行。
+    const key = `asr:${modelId}`;
+    const abort = new AbortController();
+    downloadAborts.set(key, abort);
     try {
-      await downloadAsrModels(MODELS_DIR, modelId, (p) => sendToRenderer('setup:progress', p));
+      await downloadAsrModels(
+        MODELS_DIR,
+        modelId,
+        (p) => sendToRenderer('setup:progress', { kind: 'asr', id: modelId, ...p }),
+        abort.signal
+      );
       return { ok: true };
     } catch (err) {
+      if (abort.signal.aborted) return { ok: false, error: 'cancelled' };
       return { ok: false, error: (err as Error).message };
+    } finally {
+      if (downloadAborts.get(key) === abort) downloadAborts.delete(key);
     }
   }
 );
@@ -489,6 +505,27 @@ ipcMain.handle('models:list', (): ModelInfo[] => {
   return models;
 });
 
+// 删除某模型的全部已下文件（ASR：models/<dir>，公共依赖 VAD 在根目录不受影响；翻译：<cacheDir>/<modelId>）。
+// 在用则先 kill 对应子进程释放文件句柄（下次 start/translate 按新设置重建）。models:delete 与
+// models:cancel-download 共用；未知 id 抛错。
+function deleteModelFiles(kind: ModelKind, id: string): void {
+  if (kind === 'asr') {
+    const spec = getAsrModel(id);
+    if (!spec) throw new Error('未知的识别模型');
+    fs.rmSync(path.join(MODELS_DIR, spec.dir), { recursive: true, force: true });
+    if (asrChildConfig?.modelId === id) {
+      reconfigureAsr();
+    }
+  } else {
+    const spec = getTranslationModel(id);
+    if (!spec) throw new Error('未知的翻译模型');
+    if (loadSettings().translation.engine === id) {
+      reconfigureTranslate();
+    }
+    fs.rmSync(path.join(TRANSLATION_CACHE_DIR, spec.modelId), { recursive: true, force: true });
+  }
+}
+
 // 模型管理页：删除某个已下载模型（录音会话中拒绝）
 ipcMain.handle(
   'models:delete',
@@ -497,31 +534,25 @@ ipcMain.handle(
       return { ok: false, error: '录音进行中，无法删除模型' };
     }
     try {
-      if (kind === 'asr') {
-        const spec = getAsrModel(id);
-        if (!spec) return { ok: false, error: '未知的识别模型' };
-        // 删除该模型目录（公共依赖 VAD 位于 models 根目录，不受影响）
-        fs.rmSync(path.join(MODELS_DIR, spec.dir), { recursive: true, force: true });
-        // 删的是当前子进程在用的模型：kill，下次 start/prewarm 按新设置重建
-        if (asrChildConfig?.modelId === id) {
-          reconfigureAsr();
-        }
-      } else {
-        // 翻译模型：只删该模型在 transformers 缓存中的子目录（<cacheDir>/<modelId>），不动其它模型。
-        const spec = getTranslationModel(id);
-        if (!spec) return { ok: false, error: '未知的翻译模型' };
-        // 删的是在用引擎时先 kill 翻译子进程释放文件句柄（下次 start/translate 按新设置重建）。
-        if (loadSettings().translation.engine === id) {
-          reconfigureTranslate();
-        }
-        fs.rmSync(path.join(TRANSLATION_CACHE_DIR, spec.modelId), { recursive: true, force: true });
-      }
+      deleteModelFiles(kind, id);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     }
   }
 );
+
+// 后台下载的取消入口：只中止该模型的在途下载（并行下载互不影响）并删除其全部残留（回未下载态）。
+// abort 是同步信号、deleteModelFiles 同步执行，先删目录再让在途下载在下次 I/O 续期时失败，故不残留。
+ipcMain.handle('models:cancel-download', (_event, kind: ModelKind, id: string): { ok: boolean } => {
+  downloadAborts.get(`${kind}:${id}`)?.abort();
+  try {
+    deleteModelFiles(kind, id);
+  } catch {
+    /* 未知 id / 未下载：忽略，尽力清理；listModels 刷新会反映真实状态 */
+  }
+  return { ok: true };
+});
 
 // 下载页/录音前检查：指定本地翻译模型（按 id，与当前引擎无关）是否已完整缓存。
 ipcMain.handle('translation:setup-status', (_event, modelId: string): { ready: boolean } => {
@@ -536,12 +567,23 @@ ipcMain.handle(
   (_event, modelId: string): Promise<{ ok: boolean; error?: string }> => {
     const inflight = translationDownloads.get(modelId);
     if (inflight) return inflight;
-    const promise = downloadTranslationModel(TRANSLATION_CACHE_DIR, modelId, (p) =>
-      sendToRenderer('setup:progress', p)
+    const key = `translation:${modelId}`;
+    const abort = new AbortController();
+    downloadAborts.set(key, abort);
+    const promise = downloadTranslationModel(
+      TRANSLATION_CACHE_DIR,
+      modelId,
+      (p) => sendToRenderer('setup:progress', { kind: 'translation', id: modelId, ...p }),
+      abort.signal
     )
       .then(() => ({ ok: true }))
-      .catch((err: unknown) => ({ ok: false, error: (err as Error).message }))
-      .finally(() => translationDownloads.delete(modelId));
+      .catch((err: unknown) =>
+        abort.signal.aborted ? { ok: false, error: 'cancelled' } : { ok: false, error: (err as Error).message }
+      )
+      .finally(() => {
+        translationDownloads.delete(modelId);
+        if (downloadAborts.get(key) === abort) downloadAborts.delete(key);
+      });
     translationDownloads.set(modelId, promise);
     return promise;
   }

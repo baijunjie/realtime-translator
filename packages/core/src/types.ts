@@ -80,12 +80,16 @@ export interface SetupStatus {
   asrReady: boolean;
 }
 
-/** ASR 模型下载进度 */
+/** 模型下载进度（ASR / 翻译共用）。并行下载时按 kind+id 归属到对应模型条目。 */
 export interface SetupProgress {
   /** 已下载字节 */
   loaded: number;
   /** 总字节 */
   total: number;
+  /** 进度所属模型类别（下载器发事件时携带；并行下载归属用）。 */
+  kind?: ModelKind;
+  /** 进度所属模型注册表 id（同上）。 */
+  id?: string;
 }
 
 /** OpenAI 兼容云端翻译配置 */

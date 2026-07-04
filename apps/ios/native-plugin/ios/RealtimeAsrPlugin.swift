@@ -42,6 +42,7 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     CAPPluginMethod(name: "downloadModels", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "listModels", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "deleteModel", returnType: CAPPluginReturnPromise),
+    CAPPluginMethod(name: "cancelDownload", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "getMicStatus", returnType: CAPPluginReturnPromise),
     CAPPluginMethod(name: "openMicSettings", returnType: CAPPluginReturnPromise),
   ]
@@ -95,6 +96,12 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   /// takes effect on the next session. Both are only touched on asrQueue.
   private var loadedModelId: String?
   private var loadedLanguage: String?
+
+  // 后台下载的取消协调（下载跑在 asrQueue 上、被信号量阻塞，故取消必须从别的线程操作这两个字段）：
+  // downloadLock 保护跨线程访问；cancelDownload 置 downloadCancelled 并 cancel 在途 task 以解除阻塞。
+  private let downloadLock = NSLock()
+  private var downloadCancelled = false
+  private var currentDownloadTask: URLSessionDownloadTask?
 
   private var isRunning = false
   /// Tracks whether an input tap is currently installed on the engine's bus. installTap on a
@@ -349,6 +356,39 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
       } catch {
         call.resolve(["ok": false, "error": error.localizedDescription])
       }
+    }
+  }
+
+  /// Cancel the in-flight download of a model (if any) and delete its residue (back to not-downloaded).
+  /// Must run OFF asrQueue: the download occupies asrQueue blocked on a semaphore, so we cancel the
+  /// URLSession task here (unblocking it) and queue the file deletion behind the now-unwinding download.
+  @objc func cancelDownload(_ call: CAPPluginCall) {
+    guard let modelId = call.getString("id") else {
+      call.resolve(["ok": true])
+      return
+    }
+    downloadLock.lock()
+    downloadCancelled = true
+    let task = currentDownloadTask
+    downloadLock.unlock()
+    task?.cancel()
+    // Delete residue on asrQueue so it runs after the cancelled download unwinds (no file-op race).
+    asrQueue.async { [weak self] in
+      guard let self = self else {
+        call.resolve(["ok": true])
+        return
+      }
+      if let spec = AsrModels.model(id: modelId) {
+        let root = self.modelsDir()
+        if spec.dir.isEmpty {
+          for file in spec.files {
+            try? FileManager.default.removeItem(atPath: root.appendingPathComponent(file.filename).path)
+          }
+        } else {
+          try? FileManager.default.removeItem(at: root.appendingPathComponent(spec.dir, isDirectory: true))
+        }
+      }
+      call.resolve(["ok": true])
     }
   }
 
@@ -734,12 +774,17 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   /// first so the dominant file (the ~228MB SenseVoice int8 model) finishes last and the byte
   /// progress climbs smoothly to 100%.
   private func downloadAllModels(_ modelId: String) throws {
+    // 本次下载开始，清除上一次可能残留的取消标志。
+    downloadLock.lock()
+    downloadCancelled = false
+    downloadLock.unlock()
     let root = modelsDir()
     let files = AsrModels.requiredFiles(id: modelId).sorted { $0.approxBytes < $1.approxBytes }
     let totalBytes = files.reduce(0) { $0 + $1.approxBytes }
     var completedBytes = 0
 
     for file in files {
+      if isDownloadCancelled() { throw asrError("download cancelled") }
       let destDir = file.dir.isEmpty ? root : root.appendingPathComponent(file.dir, isDirectory: true)
       try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
       let dest = destDir.appendingPathComponent(file.filename)
@@ -750,6 +795,8 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
       let baseCompleted = completedBytes
       try downloadFile(from: file.urls, to: dest) { loadedThisFile in
         self.notifyListeners("setupProgress", data: [
+          "kind": "asr",
+          "id": modelId,
           "loaded": baseCompleted + loadedThisFile,
           "total": totalBytes,
         ])
@@ -760,7 +807,7 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     guard modelsReady(modelId) else {
       throw asrError("ASR model verification failed after download")
     }
-    notifyListeners("setupProgress", data: ["loaded": totalBytes, "total": totalBytes])
+    notifyListeners("setupProgress", data: ["kind": "asr", "id": modelId, "loaded": totalBytes, "total": totalBytes])
   }
 
   /// Download `dest` from an ordered list of sources, trying each once until one succeeds; throws an
@@ -774,6 +821,8 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     }
     var errors: [String] = []
     for urlString in urls {
+      // 用户取消：立即停止，不再尝试后续源。
+      if isDownloadCancelled() { throw asrError("download cancelled") }
       do {
         try downloadFromURL(urlString, to: dest, onBytes: onBytes)
         return
@@ -786,13 +835,22 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
                    + errors.joined(separator: "\n"))
   }
 
+  /// 线程安全读取取消标志（cancelDownload 在别的线程置位）。
+  private func isDownloadCancelled() -> Bool {
+    downloadLock.lock()
+    defer { downloadLock.unlock() }
+    return downloadCancelled
+  }
+
   /// Synchronous (on asrQueue) URLSession download from a single URL to a temp file, then atomic move.
   /// Follows GitHub/HF redirects automatically. `onBytes` reports bytes written so far.
+  /// 把 task 暴露给 currentDownloadTask，使 cancelDownload 能从别的线程 task.cancel() 解除本函数的信号量阻塞。
   private func downloadFromURL(_ urlString: String, to dest: URL,
                                onBytes: @escaping (Int) -> Void) throws {
     guard let url = URL(string: urlString) else {
       throw asrError("invalid model URL: \(urlString)")
     }
+    if isDownloadCancelled() { throw asrError("download cancelled") }
     let semaphore = DispatchSemaphore(value: 0)
     var resultError: Error?
 
@@ -820,8 +878,14 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
         resultError = error
       }
     }
+    downloadLock.lock()
+    currentDownloadTask = task
+    downloadLock.unlock()
     task.resume()
     semaphore.wait()
+    downloadLock.lock()
+    currentDownloadTask = nil
+    downloadLock.unlock()
     session.finishTasksAndInvalidate()
 
     if let resultError = resultError { throw resultError }

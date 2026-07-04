@@ -115,6 +115,7 @@ export function createMacBridge(api: ElectronApi): AppBridge {
     downloadAsrModels: (modelId) => api.downloadAsrModels(modelId),
     listModels: () => api.listModels(),
     deleteModel: (kind, id) => api.deleteModel(kind, id),
+    cancelModelDownload: (kind, id) => api.cancelModelDownload(kind, id),
     getTranslationSetupStatus: (modelId) => api.getTranslationSetupStatus(modelId),
     downloadTranslationModel: (modelId) => api.downloadTranslationModel(modelId),
     saveArchive: (name, lines) => api.saveArchive(name, lines),

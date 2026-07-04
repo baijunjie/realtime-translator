@@ -27,6 +27,7 @@ const api: ElectronApi = {
   downloadAsrModels: (modelId) => ipcRenderer.invoke('setup:download-asr', modelId),
   listModels: () => ipcRenderer.invoke('models:list'),
   deleteModel: (kind, id) => ipcRenderer.invoke('models:delete', kind, id),
+  cancelModelDownload: (kind, id) => ipcRenderer.invoke('models:cancel-download', kind, id),
   getTranslationSetupStatus: (modelId) => ipcRenderer.invoke('translation:setup-status', modelId),
   downloadTranslationModel: (modelId) => ipcRenderer.invoke('translation:download', modelId),
   onSetupProgress: (cb) => subscribe('setup:progress', cb),

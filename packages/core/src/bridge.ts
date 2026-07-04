@@ -102,6 +102,12 @@ export interface AppBridge {
    * （loaded/total）上报，完成/失败由返回值表达（失败带 error 供重试）。与 getTranslationSetupStatus 成对提供。
    */
   downloadTranslationModel?(modelId: string): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * 中止指定模型的在途下载（若正在下载）并**删除其已下载的全部文件/缓存**（清残留，回到未下载态）。
+   * 供后台下载的「取消」入口用：下载在后台进行、UI 以进度条 + X 呈现，点 X 即调本方法。
+   * 非在途/未知 id 时应为安全 no-op（仍尽力清理残留）。各端复用其既有删除逻辑（deleteModel 同款）。
+   */
+  cancelModelDownload(kind: ModelKind, modelId: string): Promise<void>;
   /** 归档：保存一次对话，返回更新后的列表 */
   saveArchive(name: string, lines: ArchiveLine[]): Promise<ArchiveSummary[]>;
   listArchives(): Promise<ArchiveSummary[]>;

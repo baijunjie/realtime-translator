@@ -91,6 +91,11 @@ export async function areModelsCached(modelId: string): Promise<boolean> {
   }
 }
 
+// 并行下载去重（键为 Cache 键）：多个 ASR 模型共享同一文件（Silero VAD）时只真正下一次，
+// 其余并发下载等它完成后按缓存命中计入，避免重复下载与「一路失败 cache.delete 掉另一路成果」的竞态。
+// 条目在页面会话内保留（极少）；文件已缓存时上层 cache.match 先命中，不会走到这里。
+const sharedCacheDownloads = new Map<string, Promise<void>>();
+
 /**
  * 确保所有模型已下载并缓存。已缓存的文件跳过下载（但其大小计入已完成进度）。
  * onProgress 以聚合字节回吐（loaded/total）；total 为各文件 approxBytes 之和。
@@ -101,6 +106,7 @@ export async function areModelsCached(modelId: string): Promise<boolean> {
 export async function ensureModelsCached(
   modelId: string,
   onProgress?: (p: DownloadProgress) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (typeof caches === 'undefined') {
     throw new Error('Cache Storage 不可用，无法缓存 ASR 模型');
@@ -112,17 +118,38 @@ export async function ensureModelsCached(
   let completedBase = 0;
 
   for (const file of modelFiles(modelId)) {
+    // 用户取消（外部 signal）：不再开始下一个文件，直接抛出中止（在途文件由 fetchIntoCache 清理，
+    // 已完成文件由 cancelModelDownload 的整体删除兜底）。
+    if (signal?.aborted) throw new DOMException('下载已取消', 'AbortError');
     const key = cacheKey(file);
-    const cached = await cache.match(key);
-    if (cached) {
+    if (await cache.match(key)) {
       completedBase += file.approxBytes;
       onProgress?.({ loaded: completedBase, total });
       continue;
     }
+    // 并行去重：另一模型已在下同一文件（VAD）→ 等它完成，已缓存则计入并跳过；它失败（未缓存）则本路自己下。
+    const inflight = sharedCacheDownloads.get(key);
+    if (inflight) {
+      await inflight;
+      if (await cache.match(key)) {
+        completedBase += file.approxBytes;
+        onProgress?.({ loaded: completedBase, total });
+        continue;
+      }
+    }
 
-    await downloadIntoCache(cache, key, file, (fileLoaded) => {
-      onProgress?.({ loaded: completedBase + fileLoaded, total });
-    });
+    // 本路负责下载：登记 promise（不抛版）供并发的其它模型等待；本路自身 await 原始 promise 以感知失败。
+    const p = downloadIntoCache(
+      cache,
+      key,
+      file,
+      (fileLoaded) => {
+        onProgress?.({ loaded: completedBase + fileLoaded, total });
+      },
+      signal,
+    );
+    sharedCacheDownloads.set(key, p.then(() => undefined, () => undefined));
+    await p;
     completedBase += file.approxBytes;
     onProgress?.({ loaded: completedBase, total });
   }
@@ -181,6 +208,7 @@ async function downloadIntoCache(
   key: string,
   file: AsrModelFile,
   onFileProgress: (loaded: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const urls = resolveUrls(file);
   if (urls.length === 0) {
@@ -189,9 +217,11 @@ async function downloadIntoCache(
   const errors: string[] = [];
   for (const url of urls) {
     try {
-      await fetchIntoCache(cache, key, url, file, onFileProgress);
+      await fetchIntoCache(cache, key, url, file, onFileProgress, signal);
       return;
     } catch (err) {
+      // 用户取消：立即停止，不再尝试后续源（否则会拿已 abort 的 signal 空转一轮）。
+      if (signal?.aborted) throw err;
       errors.push(`${url} → ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -212,6 +242,7 @@ async function fetchIntoCache(
   url: string,
   file: AsrModelFile,
   onFileProgress: (loaded: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const controller = new AbortController();
   let stalled = false;
@@ -223,6 +254,14 @@ async function fetchIntoCache(
       controller.abort();
     }, STALL_TIMEOUT_MS);
   };
+
+  // 用户取消（外部 signal）与内部停滞看门狗合流：外部 abort 触发内部 controller.abort()。
+  // stalled 保持 false，故走「取消/一般错误」分支而非「下载停滞」文案。
+  const onExternalAbort = (): void => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
 
   armWatchdog(); // 连接/响应头阶段也受同一 signal 约束
   try {
@@ -275,9 +314,11 @@ async function fetchIntoCache(
     }
   } catch (err) {
     // 看门狗触发的 abort 转成明确的停滞错误，交给上层失败→重试 UI 接管。
-    if (stalled) throw new Error(`下载停滞，请检查网络后重试: ${file.filename}`);
+    // 外部取消（signal.aborted）不改文案，按 AbortError 原样上抛，由 downloadIntoCache/管理器识别为取消。
+    if (stalled && !signal?.aborted) throw new Error(`下载停滞，请检查网络后重试: ${file.filename}`);
     throw err;
   } finally {
     if (watchdog !== undefined) clearTimeout(watchdog);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
 }

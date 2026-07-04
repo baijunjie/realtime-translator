@@ -19,6 +19,14 @@ export function asrModelsReady(modelsDir: string, modelId: string): boolean {
 // 「无进展超时」而非「总时长超时」——大文件慢速下载合法，只在字节流真正停滞时触发。
 const STALL_TIMEOUT_MS = 30_000;
 
+// .part 临时文件的进程内唯一序号：即使去重失效（防御性），也不会有两路写同一个 .part 互相破坏。
+let partSeq = 0;
+
+// 并行下载去重（键为最终落地路径）：多个 ASR 模型共享同一文件（Silero VAD，最小、每个下载都先下），
+// 只有一路真正下载，其余并发下载等它完成后按「文件是否已落地」计入，避免重复下载与并发写同一目标。
+// 条目在会话内保留（数量=曾下过的文件数，极少）；某文件已在磁盘时上层的 existsSync 先命中，不会走到这里。
+const sharedDownloads = new Map<string, Promise<void>>();
+
 /**
  * 从多个下载源按序尝试下载到 dest：每个 URL 只试一次，成功即返回，全部失败才抛出聚合错误。
  * urls 为按端分源的有序列表（macOS native 端取注册表 file.nativeUrls：自托管 GitHub Release 优先、
@@ -28,15 +36,18 @@ const STALL_TIMEOUT_MS = 30_000;
 export async function downloadFile(
   urls: string[],
   dest: string,
-  onBytes?: (loaded: number, total: number) => void
+  onBytes?: (loaded: number, total: number) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   if (urls.length === 0) throw new Error(`无可用下载源: ${dest}`);
   const errors: string[] = [];
   for (const url of urls) {
     try {
-      await downloadFromUrl(url, dest, onBytes);
+      await downloadFromUrl(url, dest, onBytes, signal);
       return;
     } catch (err) {
+      // 用户取消（外部 signal aborted）：立即停止，不再尝试后续源。
+      if (signal?.aborted) throw err;
       errors.push(`${url} → ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -46,11 +57,13 @@ export async function downloadFile(
 
 /**
  * 从单一 URL 流式下载到 dest（先写 .part 再原子 rename），带无进展看门狗。失败/中断时清理本次 .part。
+ * 外部 signal（用户取消）与内部停滞看门狗合流：外部 abort 触发内部 controller.abort()。
  */
 async function downloadFromUrl(
   url: string,
   dest: string,
-  onBytes?: (loaded: number, total: number) => void
+  onBytes?: (loaded: number, total: number) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   // 无进展看门狗：字节流停滞（TCP 静默断开、无 RST）时主动 abort，避免永久挂起。
   const controller = new AbortController();
@@ -63,6 +76,13 @@ async function downloadFromUrl(
       controller.abort();
     }, STALL_TIMEOUT_MS);
   };
+
+  // 外部取消 → 中止本次 fetch（stalled 保持 false，故不误报「下载停滞」，按 AbortError 上抛）。
+  const onExternalAbort = (): void => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onExternalAbort, { once: true });
+  }
 
   armWatchdog(); // 连接/响应头阶段也受同一 signal 约束
   try {
@@ -80,7 +100,8 @@ async function downloadFromUrl(
     });
     // 先写 .part 临时文件，校验完整后原子 rename 到最终路径：中断/失败不会在最终路径
     // 留下半截文件（模型就绪检查按最终路径的存在性判断，半截文件会被误判为就绪）。
-    const part = `${dest}.part`;
+    // 唯一后缀避免并行下载共享文件（VAD）时并发写同一 .part 互相破坏。
+    const part = `${dest}.${partSeq++}.part`;
     armWatchdog(); // 连接完成，为首字节到达重置一次计时
     try {
       await streamPipeline(body, fs.createWriteStream(part));
@@ -95,11 +116,12 @@ async function downloadFromUrl(
       throw err;
     }
   } catch (err) {
-    // 看门狗触发的 abort 转成明确的中文停滞错误，交给上层失败→重试 UI 接管。
-    if (stalled) throw new Error('下载停滞，请检查网络后重试');
+    // 看门狗触发的 abort 转成明确的中文停滞错误；外部取消（signal aborted）不改文案，按原样上抛。
+    if (stalled && !signal?.aborted) throw new Error('下载停滞，请检查网络后重试');
     throw err;
   } finally {
     if (watchdog !== undefined) clearTimeout(watchdog);
+    signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -111,7 +133,8 @@ async function downloadFromUrl(
 export async function downloadAsrModels(
   modelsDir: string,
   modelId: string,
-  onProgress: (p: SetupProgress) => void
+  onProgress: (p: SetupProgress) => void,
+  signal?: AbortSignal
 ): Promise<void> {
   const spec = getAsrModel(modelId);
   if (!spec) throw new Error(`未知的识别模型: ${modelId}`);
@@ -129,11 +152,33 @@ export async function downloadAsrModels(
 
   let base = 0; // 已完成文件的累计实收字节
   for (const f of toDownload) {
+    // 用户取消：不再开始下一个文件（在途文件由 downloadFile 中止清理，已完成文件由 cancel 整体删除）。
+    if (signal?.aborted) throw new Error('下载已取消');
+    const dest = localPath(f);
+    // 并行去重：另一模型已在下同一文件（VAD）→ 等它完成，已落地则按文件字节计入并跳过；
+    // 它失败（文件未落地）则本路自己下（落到下面）。
+    const inflight = sharedDownloads.get(dest);
+    if (inflight) {
+      await inflight;
+      if (fs.existsSync(dest)) {
+        base += f.approxBytes;
+        onProgress({ loaded: base, total });
+        continue;
+      }
+    }
     let last = 0;
-    await downloadFile(f.nativeUrls, localPath(f), (loaded) => {
-      last = loaded;
-      onProgress({ loaded: base + loaded, total });
-    });
+    // 本路负责下载：登记 promise（不抛版）供并发的其它模型等待；本路自身仍 await 原始 promise 以感知失败。
+    const p = downloadFile(
+      f.nativeUrls,
+      dest,
+      (loaded) => {
+        last = loaded;
+        onProgress({ loaded: base + loaded, total });
+      },
+      signal
+    );
+    sharedDownloads.set(dest, p.then(() => undefined, () => undefined));
+    await p;
     base += last;
   }
 

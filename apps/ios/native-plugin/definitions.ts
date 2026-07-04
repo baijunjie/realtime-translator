@@ -65,6 +65,12 @@ export interface RealtimeAsrPlugin {
    */
   deleteModel(options: { id: string }): Promise<{ ok: boolean; error?: string }>;
 
+  /**
+   * 取消指定 ASR 模型的在途下载（若正在下载）并删除其全部残留（回未下载态）。后台下载的「取消」入口。
+   * 非在途时仅尽力清理（安全 no-op）。
+   */
+  cancelDownload(options: { id: string }): Promise<{ ok: boolean }>;
+
   /** 查询麦克风权限状态（映射到 @rt/core 的 MicPermission）。 */
   getMicStatus(): Promise<{ status: string }>;
 

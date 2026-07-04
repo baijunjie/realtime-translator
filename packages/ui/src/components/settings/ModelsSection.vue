@@ -1,13 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
-import { NButton, NTag, NPopconfirm, NTooltip } from 'naive-ui';
-import { Download, Trash2 } from '@lucide/vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { NButton, NTag, NPopconfirm, NTooltip, NProgress } from 'naive-ui';
+import { Download, Trash2, X, RotateCw } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
 import { getAsrModel, getTranslationModel, type ModelInfo } from '@rt/core';
 import { bridge } from '../../bridge';
 import { recording, recordBusy, modelLoading } from '../../composables/useTranscription';
+import {
+  type DownloadTask,
+  startDownloads,
+  cancelDownload,
+  retryDownload,
+  onDownloadDone,
+  isDownloading,
+  downloadFailed,
+  downloadEntry,
+  percentOf,
+} from '../../composables/useModelDownloads';
 import { humanBytes } from '../../utils/bytes';
-import ModelDownloadModal, { type DownloadTask } from '../ModelDownloadModal.vue';
+import ModelDownloadModal from '../ModelDownloadModal.vue';
 
 const { t } = useI18n();
 
@@ -35,6 +46,11 @@ function sizeText(m: ModelInfo): string {
   return humanBytes(m.downloaded ? m.sizeBytes : registryBytes(m));
 }
 
+// 下载中该行的进度未知（total===0，首个进度事件前）时进度条走 indeterminate。
+function indeterminate(m: ModelInfo): boolean {
+  return (downloadEntry(m.kind, m.id)?.total ?? 0) === 0;
+}
+
 async function refresh(): Promise<void> {
   models.value = await bridge().listModels();
 }
@@ -44,7 +60,7 @@ async function remove(m: ModelInfo): Promise<void> {
   await refresh();
 }
 
-// —— 手动下载未下载的模型：复用全局下载弹窗（确认体积 → 进度 → 失败重试）——
+// —— 后台下载：确认弹窗仅征询体积，确认后交给下载管理器后台下载（行内进度条 + X 取消）——
 const downloadModalOpen = ref(false);
 const downloadTasks = ref<DownloadTask[]>([]);
 
@@ -55,21 +71,37 @@ function canDownload(m: ModelInfo): boolean {
 }
 
 function download(m: ModelInfo): void {
-  downloadTasks.value =
-    m.kind === 'asr'
-      ? [
-          {
-            kind: 'asr',
-            modelId: m.id,
-            nameKey: getAsrModel(m.id)?.nameKey ?? m.id,
-            sizeBytes: registryBytes(m),
-          },
-        ]
-      : [{ kind: 'translation', modelId: m.id, nameKey: getTranslationModel(m.id)?.nameKey ?? m.id, sizeBytes: registryBytes(m) }];
+  const nameKey =
+    (m.kind === 'asr' ? getAsrModel(m.id)?.nameKey : getTranslationModel(m.id)?.nameKey) ?? m.id;
+  downloadTasks.value = [{ kind: m.kind, modelId: m.id, nameKey, sizeBytes: registryBytes(m) }];
   downloadModalOpen.value = true;
 }
 
-onMounted(refresh);
+// 确认后转后台下载；行会据下载管理器状态自动切到「进度条 + X」。
+function onConfirm(tasks: DownloadTask[]): void {
+  startDownloads(tasks);
+}
+
+async function cancel(m: ModelInfo): Promise<void> {
+  await cancelDownload(m.kind, m.id);
+  await refresh();
+}
+
+function retry(m: ModelInfo): void {
+  retryDownload(m.kind, m.id);
+}
+
+// 下载完成/失败/取消后刷新列表（更新 downloaded/占用），保持展示与实际缓存一致。
+let offDone: (() => void) | null = null;
+onMounted(() => {
+  void refresh();
+  offDone = onDownloadDone(() => {
+    void refresh();
+  });
+});
+onUnmounted(() => {
+  offDone?.();
+});
 </script>
 
 <template>
@@ -93,11 +125,41 @@ onMounted(refresh);
             </div>
             <div class="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
               <span class="tabular-nums">{{ sizeText(m) }}</span>
-              <span v-if="!m.downloaded"> · {{ t('modelsScreen.notDownloaded') }}</span>
+              <span v-if="isDownloading(m.kind, m.id)"> · {{ t('download.downloading') }}</span>
+              <span v-else-if="!m.downloaded"> · {{ t('modelsScreen.notDownloaded') }}</span>
             </div>
           </div>
+          <!-- 下载中：进度条 + 取消 X -->
+          <div v-if="isDownloading(m.kind, m.id)" class="flex w-32 items-center gap-2">
+            <n-progress
+              type="line"
+              class="flex-1"
+              :percentage="percentOf(m.kind, m.id)"
+              :show-indicator="false"
+              :height="6"
+              :processing="indeterminate(m)"
+            />
+            <n-tooltip>
+              <template #trigger>
+                <n-button quaternary circle size="small" :aria-label="t('modelsScreen.cancelDownload')" @click="cancel(m)">
+                  <template #icon><X :size="16" /></template>
+                </n-button>
+              </template>
+              {{ t('modelsScreen.cancelDownload') }}
+            </n-tooltip>
+          </div>
+          <!-- 失败：重试 -->
+          <n-tooltip v-else-if="downloadFailed(m.kind, m.id)">
+            <template #trigger>
+              <n-button quaternary circle size="small" type="error" :aria-label="t('download.retry')" @click="retry(m)">
+                <template #icon><RotateCw :size="16" /></template>
+              </n-button>
+            </template>
+            {{ t('download.retry') }}
+          </n-tooltip>
+          <!-- 已下载：删除 -->
           <n-popconfirm
-            v-if="m.downloaded"
+            v-else-if="m.downloaded"
             :positive-text="t('modelsScreen.delete')"
             :negative-text="t('archive.cancel')"
             @positive-click="remove(m)"
@@ -114,6 +176,7 @@ onMounted(refresh);
             </template>
             {{ m.inUse ? t('modelsScreen.deleteInUseWarn') : t('modelsScreen.deleteConfirm') }}
           </n-popconfirm>
+          <!-- 未下载：下载 -->
           <n-tooltip v-else-if="canDownload(m)">
             <template #trigger>
               <n-button
@@ -151,11 +214,38 @@ onMounted(refresh);
             </div>
             <div class="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
               <span class="tabular-nums">{{ sizeText(m) }}</span>
-              <span v-if="!m.downloaded"> · {{ t('modelsScreen.notDownloaded') }}</span>
+              <span v-if="isDownloading(m.kind, m.id)"> · {{ t('download.downloading') }}</span>
+              <span v-else-if="!m.downloaded"> · {{ t('modelsScreen.notDownloaded') }}</span>
             </div>
           </div>
+          <div v-if="isDownloading(m.kind, m.id)" class="flex w-32 items-center gap-2">
+            <n-progress
+              type="line"
+              class="flex-1"
+              :percentage="percentOf(m.kind, m.id)"
+              :show-indicator="false"
+              :height="6"
+              :processing="indeterminate(m)"
+            />
+            <n-tooltip>
+              <template #trigger>
+                <n-button quaternary circle size="small" :aria-label="t('modelsScreen.cancelDownload')" @click="cancel(m)">
+                  <template #icon><X :size="16" /></template>
+                </n-button>
+              </template>
+              {{ t('modelsScreen.cancelDownload') }}
+            </n-tooltip>
+          </div>
+          <n-tooltip v-else-if="downloadFailed(m.kind, m.id)">
+            <template #trigger>
+              <n-button quaternary circle size="small" type="error" :aria-label="t('download.retry')" @click="retry(m)">
+                <template #icon><RotateCw :size="16" /></template>
+              </n-button>
+            </template>
+            {{ t('download.retry') }}
+          </n-tooltip>
           <n-popconfirm
-            v-if="m.downloaded"
+            v-else-if="m.downloaded"
             :positive-text="t('modelsScreen.delete')"
             :negative-text="t('archive.cancel')"
             @positive-click="remove(m)"
@@ -190,12 +280,11 @@ onMounted(refresh);
       </ul>
     </section>
 
-    <!-- 手动下载：done 后刷新列表；cancel（含失败放弃）也刷新，保持展示与实际缓存一致 -->
+    <!-- 下载确认弹窗：确认后转后台下载（行内进度）；取消即关闭 -->
     <model-download-modal
       v-model:show="downloadModalOpen"
       :tasks="downloadTasks"
-      @done="refresh"
-      @cancel="refresh"
+      @confirm="onConfirm"
     />
   </div>
 </template>
