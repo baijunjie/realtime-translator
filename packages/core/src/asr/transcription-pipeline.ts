@@ -141,9 +141,6 @@ export interface AsrInferenceEngine {
 export interface PipelineCallbacks {
   onSegment: (segment: SegmentPayload) => void;
   onPartial?: (partial: PartialPayload) => void;
-  // TODO 临时诊断日志（排查定稿内容丢失用，随排查结束移除）：
-  // 管线在语音起止/partial/强切/定稿/丢弃/抢救等关键决策点输出一行结构化文本。
-  onLog?: (line: string) => void;
 }
 
 interface HistoryChunk {
@@ -180,18 +177,10 @@ export class TranscriptionPipeline {
   private bestPartial: { text: string; lang: string; end: number } | null = null;
   private partialGap = Math.round(PARTIAL_INTERVAL_SECONDS * SAMPLE_RATE); // 自适应间隔（采样）
 
-  private readonly onLog: (line: string) => void;
-
   constructor(engine: AsrInferenceEngine, callbacks: PipelineCallbacks) {
     this.engine = engine;
     this.onSegment = callbacks.onSegment;
     this.onPartial = callbacks.onPartial ?? (() => {});
-    this.onLog = callbacks.onLog ?? (() => {});
-  }
-
-  /** TODO 临时诊断：会话相对秒（与 segment.start 同基线），保留两位小数 */
-  private ts(samples: number): string {
-    return ((samples - this.sessionBase) / SAMPLE_RATE).toFixed(2);
   }
 
   private rememberHistory(samples: Float32Array): void {
@@ -240,7 +229,6 @@ export class TranscriptionPipeline {
 
   /** 录音结束时调用，把未闭合的语音段定稿 */
   flush(): void {
-    this.onLog(`flush t=${this.ts(this.totalSamples)} speechActive=${this.speechActive}`);
     this.engine.flushVad();
     this.engine.drainVad();
     if (this.speechActive) {
@@ -284,7 +272,6 @@ export class TranscriptionPipeline {
         this.segStart = Math.max(this.partialFloor, this.totalSamples - lookback);
         this.lastPartialAt = 0;
         this.partialGap = Math.round(PARTIAL_INTERVAL_SECONDS * SAMPLE_RATE);
-        this.onLog(`speech-start t=${this.ts(this.totalSamples)} segStart=${this.ts(this.segStart)} floor=${this.ts(this.partialFloor)}`);
       }
       this.speechEnd = this.totalSamples;
 
@@ -293,7 +280,6 @@ export class TranscriptionPipeline {
         const earliest = this.segStart + Math.round(MIN_SEGMENT_SECONDS * SAMPLE_RATE);
         const from = Math.max(earliest, this.totalSamples - Math.round(SPLIT_SEARCH_SECONDS * SAMPLE_RATE));
         const cut = this.quietestPoint(from, this.totalSamples);
-        this.onLog(`force-split t=${this.ts(this.totalSamples)} cut=${this.ts(cut)} searchWin=[${this.ts(from)},${this.ts(this.totalSamples)}]`);
         this.finalizeSegment(this.segStart, cut);
         // 下一段带重叠回看（cut ≥ 段起点+MIN_SEGMENT，回看不会越过上一段起点）；
         // partialFloor 保持在 cut——重叠只作用于强切延续的同一话流，
@@ -306,7 +292,6 @@ export class TranscriptionPipeline {
       // 不含尾随静音）。词间/换气的瞬时 false 不会触发，避免一句被切成碎片。
       if (this.totalSamples - this.speechEnd >= MIN_SILENCE_SECONDS * SAMPLE_RATE) {
         this.speechActive = false;
-        this.onLog(`silence-split t=${this.ts(this.totalSamples)} speechEnd=${this.ts(this.speechEnd)}`);
         this.finalizeSegment(this.segStart, this.speechEnd);
         this.onPartial({ text: '' });
       }
@@ -346,9 +331,6 @@ export class TranscriptionPipeline {
       Math.round(PARTIAL_INTERVAL_SECONDS * SAMPLE_RATE),
       Math.round(decodeSamples * 1.5)
     );
-    this.onLog(
-      `partial win=[${this.ts(from)},${this.ts(this.totalSamples)}] decodeMs=${Math.round((decodeSamples / SAMPLE_RATE) * 1000)} text="${result.text}"`
-    );
     if (result.text) {
       this.onPartial({ text: result.text });
       // 留作定稿失败/坍缩时的抢救文本（见 finalizeSegment）：保留本段最长的一次 partial。
@@ -372,7 +354,6 @@ export class TranscriptionPipeline {
     if (to - best.end < SALVAGE_TAIL_MIN_SECONDS * SAMPLE_RATE) return best;
     const tail = this.transcribe(this.historySlice(best.end, to));
     if (!tail.text || !/[\p{L}\p{N}]/u.test(tail.text)) return best;
-    this.onLog(`salvage-tail win=[${this.ts(best.end)},${this.ts(to)}] text="${tail.text}"`);
     return { text: best.text + tail.text, lang: best.lang };
   }
 
@@ -384,9 +365,6 @@ export class TranscriptionPipeline {
 
     const audio = this.historySlice(from, to);
     let result = this.transcribe(audio);
-    this.onLog(
-      `finalize win=[${this.ts(from)},${this.ts(to)}] dur=${((to - from) / SAMPLE_RATE).toFixed(2)}s raw="${result.text}"`
-    );
     // 定稿解码可能劣于逐次 partial（两者是独立解码）：无实文，或在交叠语音等场景下
     // 坍缩成远短于本段最佳 partial 的碎片。长段（说明确实在说话，且识别区已给用户
     // 看过 partial 文本）用本段最佳 partial 抢救定稿，避免内容无声丢失；
@@ -396,13 +374,11 @@ export class TranscriptionPipeline {
       this.bestPartial && /[\p{L}\p{N}]/u.test(this.bestPartial.text) ? this.bestPartial : null;
     if (!result.text || !/[\p{L}\p{N}]/u.test(result.text)) {
       if (!longEnough || !best) {
-        this.onLog(`finalize → DROP (无实文且不满足抢救条件)`);
         this.bestPartial = null;
         this.onPartial({ text: '' }); // 无确定文本被丢弃：清空识别区，回到「聆听中」
         return;
       }
       result = this.withSalvagedTail(best, to);
-      this.onLog(`finalize → SALVAGE(empty) text="${result.text}"`);
     } else if (
       longEnough &&
       best &&
@@ -410,14 +386,12 @@ export class TranscriptionPipeline {
       Array.from(result.text).length < COLLAPSE_RATIO * Array.from(best.text).length
     ) {
       result = this.withSalvagedTail(best, to);
-      this.onLog(`finalize → SALVAGE(collapse) text="${result.text}"`);
     }
     this.bestPartial = null;
 
     // 有结果时不在此处清 partial：整段最终解码是独立的一遍、比逐次 partial 慢，
     // 若解码前就清空识别区，会先空、解码完才上屏，造成"识别区文字消失→确定句延迟出现"的断档。
     // 改由 onSegment 到达时清（UI 收到 segment 即清 partial），让识别文字向下淡出与确定句落入同刻发生。
-    this.onLog(`finalize → EMIT id=${this.segmentId} text="${result.text}"`);
     this.onSegment({
       id: this.segmentId++,
       text: result.text,
