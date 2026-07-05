@@ -1,6 +1,6 @@
 {
   "name": "@rt/web",
-  "version": "0.1.0-beta.1",
+  "version": "0.0.0",
   "description": "Realtime Translator — installable browser PWA hosting @rt/ui",
   "private": true,
   "type": "module",

@@ -21,8 +21,9 @@ pnpm check                      # core 测试 + 三端 type-check（与 CI 的 c
 
 ## 2. 版本号
 
-- **新版本**：`pnpm set-version <x.y.z[-tag]>`（统一写入 根 / apps/macos / apps/ios 的 package.json，packages/* 不动），用 `chore: bump version to <ver>` 之类的 Conventional Commit 提交。
-- **beta 同版本重发**：版本号不动。构建之间靠「包版本+commit 短哈希」区分（构建期注入 `__APP_VERSION__`，设置页底部可见）。
+- **单一版本源**：版本号只记在**根 `package.json`** 一处；`apps/*` 与 `packages/*` 的 `version` 恒为 `0.0.0` 占位，不要改。三端设置页展示的 `__APP_VERSION__` 与 macOS dmg/App 版本均在构建期从根版本注入。
+- **新版本**：直接改根 `package.json` 的 `version`（如 `0.1.0-beta.2`），用 `chore: bump version to <ver>` 之类的 Conventional Commit 提交。
+- **beta 同版本重发**：版本号不动。构建之间靠「根版本+commit 短哈希」区分（构建期注入 `__APP_VERSION__`，设置页底部可见）。
 
 ## 3. 打包 macOS
 

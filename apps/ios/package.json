@@ -1,6 +1,6 @@
 {
   "name": "@rt/ios",
-  "version": "0.1.0-beta.2",
+  "version": "0.0.0",
   "description": "Realtime Translator — iOS (Capacitor) app hosting @rt/ui in a WebView",
   "private": true,
   "type": "module",

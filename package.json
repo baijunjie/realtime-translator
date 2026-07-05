@@ -11,7 +11,6 @@
     "type-check": "pnpm --filter @rt/macos type-check",
     "dist": "pnpm --filter @rt/macos dist",
     "dist:dir": "pnpm --filter @rt/macos dist:dir",
-    "set-version": "node scripts/set-version.mjs",
     "check": "pnpm --filter @rt/core test && pnpm --filter @rt/macos type-check && pnpm --filter @rt/web type-check && pnpm --filter @rt/ios type-check"
   },
   "keywords": [],

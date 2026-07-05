@@ -3,7 +3,7 @@
 // → 在副本里跑 electron-builder → 产物回写到 apps/macos/release。
 // 不签名构建：CSC_IDENTITY_AUTO_DISCOVERY=false pnpm --filter @rt/macos dist
 import { execSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -28,8 +28,11 @@ run(`pnpm --filter @rt/macos deploy --prod=false --legacy "${deployDir}"`, root)
 
 console.log('▶ 4/4 打包 (electron-builder)');
 const target = dirOnly ? '--dir' : '';
+// 版本单一来源：apps/macos/package.json 恒为 0.0.0 占位，打包时用根 package.json 的版本
+// 覆盖（-c.extraMetadata.version），决定 dmg 文件名与 App 的 CFBundleShortVersionString。
+const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
 run(
-  `./node_modules/.bin/electron-builder --mac ${target} -c.directories.output="${releaseDir}"`,
+  `./node_modules/.bin/electron-builder --mac ${target} -c.extraMetadata.version="${version}" -c.directories.output="${releaseDir}"`,
   deployDir
 );
 

@@ -1,6 +1,6 @@
 {
   "name": "@rt/macos",
-  "version": "0.1.0-beta.2",
+  "version": "0.0.0",
   "description": "Local, real-time speech transcription & translation for macOS",
   "main": "./out/main/index.js",
   "scripts": {
