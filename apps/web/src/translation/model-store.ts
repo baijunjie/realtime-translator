@@ -46,13 +46,16 @@ export async function isTranslationModelCached(spec: LocalModelSpec): Promise<bo
   if (typeof caches === 'undefined') return false;
   try {
     const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
+    // 仅判存在性：用 cache.keys()（返回 Request，只有 URL、无 body）取全部条目 URL 做成员判断，
+    // 而非逐文件 cache.match()。cache.match() 返回 Response，其 body 绑定到数百 MB 权重条目，
+    // 移动端 WebKit 会将其读入内存——反复进入模型管理页探测会累积成内存尖峰乃至标签页崩溃；
+    // 存在性判断无需 body，keys() 即可。缓存键即 HF resolve URL（与 Transformers.js 存入的键一致）。
+    //
     // spec 的**全部**文件条目都在才算就绪：Cache Storage 按条目逐出，离线加载
     // （allowRemoteModels=false）缺任一文件（含 tokenizer/config 小文件）都会失败，
     // 只查权重会把部分逐出误判为已就绪、且就绪后 UI 不再提供补下载入口。
-    const results = await Promise.all(
-      spec.files.map((f) => cache.match(cacheKey(spec.modelId, f))),
-    );
-    return results.every((r) => r !== undefined);
+    const cachedUrls = new Set((await cache.keys()).map((req) => req.url));
+    return spec.files.every((f) => cachedUrls.has(new Request(cacheKey(spec.modelId, f)).url));
   } catch {
     return false;
   }

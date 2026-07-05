@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed } from 'vue';
 import { NButton, NTag, NPopconfirm, NTooltip, NProgress } from 'naive-ui';
 import { Download, Trash2, X, RotateCw } from '@lucide/vue';
 import { useI18n } from 'vue-i18n';
@@ -11,18 +11,20 @@ import {
   startDownloads,
   cancelDownload,
   retryDownload,
-  onDownloadDone,
   isDownloading,
   downloadFailed,
   downloadEntry,
   percentOf,
 } from '../../composables/useModelDownloads';
+import { useModels } from '../../composables/useModels';
 import { humanBytes } from '../../utils/bytes';
 import ModelDownloadModal from '../ModelDownloadModal.vue';
 
 const { t } = useI18n();
 
-const models = ref<ModelInfo[]>([]);
+// 模型列表来自应用级单例：首次探测后跨挂载复用快照，进入页面秒开；
+// 下载完成/失败/取消由单例内部监听刷新，删除/取消在本组件显式 refreshModels。
+const { models, refreshModels } = useModels();
 const asrModels = computed(() => models.value.filter((m) => m.kind === 'asr'));
 const translationModels = computed(() => models.value.filter((m) => m.kind === 'translation'));
 
@@ -51,13 +53,9 @@ function indeterminate(m: ModelInfo): boolean {
   return (downloadEntry(m.kind, m.id)?.total ?? 0) === 0;
 }
 
-async function refresh(): Promise<void> {
-  models.value = await bridge().listModels();
-}
-
 async function remove(m: ModelInfo): Promise<void> {
   await bridge().deleteModel(m.kind, m.id);
-  await refresh();
+  await refreshModels();
 }
 
 // —— 后台下载：确认弹窗仅征询体积，确认后交给下载管理器后台下载（行内进度条 + X 取消）——
@@ -84,24 +82,12 @@ function onConfirm(tasks: DownloadTask[]): void {
 
 async function cancel(m: ModelInfo): Promise<void> {
   await cancelDownload(m.kind, m.id);
-  await refresh();
+  await refreshModels();
 }
 
 function retry(m: ModelInfo): void {
   retryDownload(m.kind, m.id);
 }
-
-// 下载完成/失败/取消后刷新列表（更新 downloaded/占用），保持展示与实际缓存一致。
-let offDone: (() => void) | null = null;
-onMounted(() => {
-  void refresh();
-  offDone = onDownloadDone(() => {
-    void refresh();
-  });
-});
-onUnmounted(() => {
-  offDone?.();
-});
 </script>
 
 <template>

@@ -81,11 +81,12 @@ export async function areModelsCached(modelId: string): Promise<boolean> {
   if (!getAsrModel(modelId)) return false;
   try {
     const cache = await caches.open(ASR_MODEL_CACHE_NAME);
-    for (const file of modelFiles(modelId)) {
-      const hit = await cache.match(cacheKey(file));
-      if (!hit) return false;
-    }
-    return true;
+    // 仅判存在性：用 cache.keys()（返回 Request，只有 URL、无 body）取全部条目 URL 做成员判断，
+    // 而非逐文件 cache.match()。cache.match() 返回 Response，其 body 绑定到数百 MB 权重条目，
+    // 移动端 WebKit 会将其读入内存——反复进入模型管理页探测会累积成内存尖峰乃至标签页崩溃；
+    // 存在性判断无需 body，keys() 即可。cache.put 存入的键即 new Request(cacheKey).url，故按此归一化比对。
+    const cachedUrls = new Set((await cache.keys()).map((req) => req.url));
+    return modelFiles(modelId).every((file) => cachedUrls.has(new Request(cacheKey(file)).url));
   } catch {
     return false;
   }
