@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="Realtime Translator" width="128" height="128" />
+</p>
+
 # Realtime Translator
 
 > Local, real-time speech transcription & translation for macOS, iOS, and the browser — audio and text stay on-device (cloud translation optional).

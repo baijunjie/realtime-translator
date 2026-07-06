@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="Realtime Translator" width="128" height="128" />
+</p>
+
 # Realtime Translator
 
 > macOS · iOS · 브라우저용 로컬 실시간 음성 전사 & 번역 — 오디오와 텍스트가 기기에 머뭅니다(클라우드 번역은 선택).

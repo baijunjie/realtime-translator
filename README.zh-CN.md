@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="Realtime Translator" width="128" height="128" />
+</p>
+
 # Realtime Translator
 
 > 本地实时语音转写与翻译，支持 macOS、iOS 与浏览器——音频和文本都留在本机（云端翻译为可选项）。

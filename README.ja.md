@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/icon.png" alt="Realtime Translator" width="128" height="128" />
+</p>
+
 # Realtime Translator
 
 > macOS・iOS・ブラウザ向けのローカル・リアルタイム音声文字起こし＆翻訳——音声もテキストも端末に留まります（クラウド翻訳は任意）。
