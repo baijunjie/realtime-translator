@@ -15,7 +15,7 @@ Try it now in your browser: **https://baijunjie.github.io/realtime-translator/**
 - Real-time microphone transcription: Chinese / Japanese / English / Korean (auto-detected, or lock the recognition language in Settings — locking it markedly cuts language misdetection on short utterances)
 - Choice of recognition model: SenseVoice (multilingual, the default everywhere) plus three single-language models — Paraformer (Chinese), ReazonSpeech (Japanese), and Parakeet (English) — on macOS (also usable experimentally on web)
 - Live captions — partial results appear while you speak, finalized when the segment ends
-- **Native-language driven** — pick your language on first launch (Chinese, Japanese, English, Korean); the whole UI is shown in it, and when translation is on, everything spoken in other languages is translated into it (Chinese output is normalized to Simplified)
+- **Native-language driven** — pick your language on first launch (Chinese, Japanese, English, Korean); the whole UI is shown in it, and when translation is on, everything spoken in other languages is translated into it (Chinese output is normalized to Simplified). When the recognition language is **Auto**, speech in your own language is translated back into the most recent other language (reverse translation)
 - Switchable audio source (macOS): microphone, or system audio (capture what your Mac is playing, macOS 14.2+); web / iOS are microphone-only
 - Switchable translation engine:
   - **Local** (default): on-device translation — downloaded once, then works offline; text never leaves your machine. macOS offers M2M-100 (lightweight, ~640 MB, default) or M2M-100 1.2B (higher quality, ~1.5 GB); web runs M2M-100; iOS uses Apple's Translation framework

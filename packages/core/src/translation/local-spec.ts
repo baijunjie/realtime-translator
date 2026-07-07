@@ -148,10 +148,19 @@ export function localTranslationSupported(
 }
 
 /**
- * 一条定稿段「要不要翻、怎么翻」的决策（平台无关）。目标恒为母语 nativeLang，三端共用同一判定。
- * - `skip`：源已是母语且字形一致，无需任何处理（不显示译文、不触发等待动画）。
- * - `script`：源与母语是同一种语言、仅简繁字形不同——直接对原文做脚本转换，不经模型/云。
- * - `translate`：源与母语是不同语言，需走翻译引擎；产出后按 toScript 归一化母语字形。
+ * 某语言在该模型下的「语言身份」（判断「是否同一种语言」时用；忽略简繁字形）。
+ * 缺省回退到该项的 app 语言键，故 yue（粤语）归 'yue' 而非其模型码 'zh'——与中文不视作同语言。
+ */
+export function langIdentity(spec: LocalModelSpec, lang: string): string {
+  return spec.langs[lang]?.lang ?? lang;
+}
+
+/**
+ * 一条定稿段「要不要翻、怎么翻」的决策（平台无关，三端共用同一判定）。目标语言由调用方给定
+ * （通常是母语；反向翻译时是「上一次的外语」，见 segment-translation）。
+ * - `skip`：源与目标是同一种语言且字形一致，无需任何处理（不显示译文、不触发等待动画）。
+ * - `script`：源与目标是同一种语言、仅简繁字形不同——直接对原文做脚本转换，不经模型/云。
+ * - `translate`：源与目标是不同语言，需走翻译引擎；产出后按 toScript 归一化目标字形。
  */
 export type TranslationPlan =
   | { readonly kind: 'skip' }
@@ -160,45 +169,40 @@ export type TranslationPlan =
       readonly kind: 'translate';
       /** 传给翻译引擎的目标模型短码（M2M100: zh/en/…）。 */
       readonly targetCode: string;
-      /** 母语 app 语言键（zh/ja/en/ko）：能感知语言的引擎（如云端提示词）用它。 */
+      /** 目标 app 语言键（zh/ja/en/ko/yue）：能感知语言的引擎（如云端提示词）用它。 */
       readonly targetLang: string;
-      /** 译文的字形后处理（中文归一化为简体）；无则不处理。 */
+      /** 译文的字形后处理（中文目标归一化为简体）；无则不处理。 */
       readonly toScript?: (text: string) => string;
     };
 
 /**
- * 决定源语言为 sourceLang 的一段文本翻成母语 nativeLang 时该如何处理。
- * 中文母语只做轻量简体归一化、绝不经模型；源已是简体则等价于跳过。
+ * 决定源语言为 sourceLang 的一段文本翻成 targetLang 时该如何处理。
+ * 中文目标只做轻量简体归一化、绝不经模型；源已是简体则等价于跳过。
  * @param sourceLang ASR 源语言短码（zh/en/ja/ko/yue）
- * @param nativeLang 母语 app 语言键（zh/ja/en/ko）
+ * @param targetLang 目标 app 语言键（zh/ja/en/ko；反向翻译时可为其它 ASR 源码如 yue）
  * @param text 源文本（用于判断字形转换后是否与原文一致）
  */
 export function planTranslation(
   spec: LocalModelSpec,
   sourceLang: string,
-  nativeLang: string,
+  targetLang: string,
   text: string,
 ): TranslationPlan {
-  const sourceEntry = spec.langs[sourceLang];
-  const targetEntry = spec.langs[nativeLang];
+  const targetEntry = spec.langs[targetLang];
   const targetCode = targetEntry?.code ?? spec.fallbackLang;
   const toScript = targetEntry?.toScript;
 
-  // 语言身份（忽略简繁字形）：缺省回退到 app 语言键，故 yue 归 'yue' 而非其模型码 'zh'。
-  const sourceLangId = sourceEntry?.lang ?? sourceLang;
-  const targetLangId = targetEntry?.lang ?? nativeLang;
-
-  // 不同语言：必须走翻译引擎（产出后按母语字形归一化）。
-  if (sourceLangId !== targetLangId) {
-    return { kind: 'translate', targetCode, targetLang: nativeLang, toScript };
+  // 不同语言：必须走翻译引擎（产出后按目标字形归一化）。
+  if (langIdentity(spec, sourceLang) !== langIdentity(spec, targetLang)) {
+    return { kind: 'translate', targetCode, targetLang, toScript };
   }
 
-  // 同一语言，且母语无字形后处理（en/ja/ko 等）：源即目标，跳过。
+  // 同一语言，且目标无字形后处理（en/ja/ko 等）：源即目标，跳过。
   if (!toScript) {
     return { kind: 'skip' };
   }
 
-  // 同一语言但母语要求简体字形：对原文做简体归一化即可。
+  // 同一语言但目标要求简体字形：对原文做简体归一化即可。
   // 转换后与原文一致（源已是简体）时等价于跳过。
   const converted = toScript(text);
   return converted === text ? { kind: 'skip' } : { kind: 'script', text: converted };

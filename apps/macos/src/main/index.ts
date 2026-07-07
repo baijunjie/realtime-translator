@@ -16,6 +16,8 @@ import {
   DEFAULT_TRANSLATION_MODEL_ID,
   getTranslationModel,
   translateFinalizedSegment,
+  createReverseTranslationContext,
+  resetReverseTranslationContext,
   CloudTranslator,
   ASR_MODELS,
   getAsrModel,
@@ -67,6 +69,9 @@ let sessionActive = false;
 // 渲染层的行 id：主进程单调递增，跨 ASR 子进程重启不归零。
 // 子进程内部的段序号随进程生命周期从 0 计，直接透传会与既有行冲突、译文回填错行。
 let nextLineId = 0;
+
+// 反向翻译会话状态：识别语言为 auto 时，听到母语的段翻成上一次识别到的外语；每次开始录音清空（见 pipeline:start）。
+const reverseCtx = createReverseTranslationContext();
 
 // 翻译跑在独立的纯 Node 子进程（child_process.fork + ELECTRON_RUN_AS_NODE）：隔离原生
 // 崩溃与超大内存分配，翻译进程挂掉也不连累主窗口，仅丢一次翻译。必须脱离 utilityProcess
@@ -274,6 +279,8 @@ function translateSegment(segment: SegmentPayload): void {
     segment,
     enabled: settings.translation.enabled,
     nativeLang: settings.nativeLang,
+    asrLanguage: settings.asr.language,
+    reverse: reverseCtx,
     translate: requestTranslate,
     emitTranslation: (p) => sendToRenderer('pipeline:translation', p),
   });
@@ -389,6 +396,7 @@ ipcMain.handle('pipeline:start', async (): Promise<StartResult> => {
   }
   // 子进程跨会话复用：每次开始录音都重置计时基线，segment.start 相对本次会话起点
   asrChild?.postMessage({ type: 'reset' });
+  resetReverseTranslationContext(reverseCtx); // 外语历史只在本次会话内有效
   sendToRenderer('pipeline:status', { state: 'running' });
   sessionActive = true;
   return { ok: true };

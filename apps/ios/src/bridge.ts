@@ -27,6 +27,8 @@ import {
   CloudTranslator,
   M2M100_SPEC,
   translateFinalizedSegment,
+  createReverseTranslationContext,
+  resetReverseTranslationContext,
   createCallbackHub,
   DEFAULT_ASR_MODEL_ID,
   getAsrModel,
@@ -130,9 +132,12 @@ export function createIosBridge(): AppBridge {
     await Preferences.set({ key: ARCHIVES_KEY, value: JSON.stringify(records) });
   }
 
-  // ---- 翻译：segment 到达时按当前设置翻成母语。编排（是否翻 / pending / 字形归一化 /
-  //      错误上报）统一在 @rt/core.translateFinalizedSegment，三端一致；这里只注入引擎调用：
-  //      设备端 Apple Translation（iOS 18+，原生插件）或云端 CloudTranslator。 ----
+  // 反向翻译会话状态：识别语言为 auto 时，听到母语的段翻成上一次识别到的外语；每次开始录音清空（见 startPipeline）。
+  const reverseCtx = createReverseTranslationContext();
+
+  // ---- 翻译：segment 到达时按当前设置翻成母语（识别语言为 auto 时母语段反向翻成上一次的外语）。
+  //      编排（是否翻 / pending / 字形归一化 / 错误上报）统一在 @rt/core.translateFinalizedSegment，
+  //      三端一致；这里只注入引擎调用：设备端 Apple Translation（iOS 18+）或云端 CloudTranslator。 ----
   async function translateSegment(seg: SegmentPayload): Promise<void> {
     const s = cachedSettings ?? (await readSettingsOnce());
     await translateFinalizedSegment({
@@ -140,6 +145,8 @@ export function createIosBridge(): AppBridge {
       segment: seg,
       enabled: s.translation.enabled,
       nativeLang: s.nativeLang,
+      asrLanguage: s.asr.language,
+      reverse: reverseCtx,
       translate: async (req) => {
         if (s.translation.engine !== 'cloud') {
           // 设备端翻译：原生框架只认模型短码；不可用/空结果按失败抛出（提示改用云翻译），
@@ -211,6 +218,7 @@ export function createIosBridge(): AppBridge {
 
     // ===== ASR 管线（原生）=====
     async startPipeline(): Promise<StartResult> {
+      resetReverseTranslationContext(reverseCtx); // 外语历史只在本次会话内有效
       try {
         const r = await RealtimeAsr.start(await currentAsrOptions());
         return { ok: r.ok, error: r.error };

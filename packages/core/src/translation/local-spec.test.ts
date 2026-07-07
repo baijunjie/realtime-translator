@@ -136,8 +136,9 @@ describe('normalizeZh 简体归一化', () => {
 });
 
 describe('planTranslation 判定矩阵（M2M100）', () => {
-  const plan = (source: string, native: string, text: string) =>
-    planTranslation(M2M100_SPEC, source, native, text);
+  // 第 3 参为目标语言（通常是母语；反向翻译时为其它语言，判定逻辑一致）。
+  const plan = (source: string, target: string, text: string) =>
+    planTranslation(M2M100_SPEC, source, target, text);
 
   it('同语言同字形：skip（zh→zh / en→en / ja→ja / ko→ko）', () => {
     expect(plan('zh', 'zh', '你好')).toEqual({ kind: 'skip' });

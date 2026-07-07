@@ -30,6 +30,8 @@ import {
   DEFAULT_TRANSLATION_MODEL_ID,
   getTranslationModel,
   translateFinalizedSegment,
+  createReverseTranslationContext,
+  resetReverseTranslationContext,
   createCallbackHub,
   ASR_MODELS,
   getAsrModel,
@@ -231,9 +233,12 @@ export function createWebBridge(): AppBridge {
     }
   }
 
-  // ---- 翻译：segment 到达时按当前设置翻成母语。编排（是否翻 / pending / 字形归一化 /
-  //      错误上报）统一在 @rt/core.translateFinalizedSegment，三端一致；这里只注入引擎调用：
-  //      云端 CloudTranslator 或本地 WebLocalTranslator（首次下载模型的进度经 status 上报）。 ----
+  // 反向翻译会话状态：识别语言为 auto 时，听到母语的段翻成上一次识别到的外语；每次开始录音清空（见 startPipeline）。
+  const reverseCtx = createReverseTranslationContext();
+
+  // ---- 翻译：segment 到达时按当前设置翻成母语（识别语言为 auto 时母语段反向翻成上一次的外语）。
+  //      编排（是否翻 / pending / 字形归一化 / 错误上报）统一在 @rt/core.translateFinalizedSegment，
+  //      三端一致；这里只注入引擎调用：云端 CloudTranslator 或本地 WebLocalTranslator。 ----
   async function translateSegment(seg: SegmentPayload): Promise<void> {
     const s = cachedSettings ?? (await readSettingsOnce());
     await translateFinalizedSegment({
@@ -243,6 +248,8 @@ export function createWebBridge(): AppBridge {
       segment: seg,
       enabled: s.translation.enabled,
       nativeLang: s.nativeLang,
+      asrLanguage: s.asr.language,
+      reverse: reverseCtx,
       translate: (req) => {
         if (s.translation.engine === 'cloud') {
           // 云端传母语 app 语言键（zh-Hant 等），让 LLM 直接产出对应字形。
@@ -305,6 +312,7 @@ export function createWebBridge(): AppBridge {
     // ===== ASR 管线 =====
     async startPipeline(): Promise<StartResult> {
       // 请求麦克风 + 建 AudioWorklet 采音，帧送 sherpa worker 实时识别。
+      resetReverseTranslationContext(reverseCtx); // 外语历史只在本次会话内有效
       syncAsrConfig();
       return asr.start();
     },
