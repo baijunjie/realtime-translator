@@ -4,7 +4,7 @@
 // 对 asr-process/测试脚本暴露的公开面（TranscriptionPipeline / SAMPLE_RATE）保持不变。
 import path from 'node:path';
 import fs from 'node:fs';
-import { Vad, OfflineRecognizer, type OfflineRecognizerConfig } from 'sherpa-onnx-node';
+import { Vad, OfflineRecognizer, type OfflineRecognizerConfig, type VadConfig } from 'sherpa-onnx-node';
 import {
   SILERO_VAD,
   getAsrModel,
@@ -44,8 +44,25 @@ function fileByRole(
   return path.join(modelsDir, f.dir, f.filename);
 }
 
-/** 按注册表 engine 装配 OfflineRecognizer 的 modelConfig（各引擎的文件角色与字段不同）。 */
-function buildModelConfig(
+/** 构造 Silero VAD 配置：探测参数与 core 管线的断句去抖保持一致（参数单源，评测脚本也复用）。 */
+export function buildVadConfig(modelsDir: string): VadConfig {
+  return {
+    sileroVad: {
+      model: path.join(modelsDir, SILERO_VAD.filename),
+      // 偏低的阈值让 VAD 更早进入语音状态，减少句首被截断
+      threshold: 0.35,
+      minSpeechDuration: 0.25,
+      minSilenceDuration: MIN_SILENCE_SECONDS,
+      windowSize: VAD_WINDOW_SIZE,
+    },
+    sampleRate: SAMPLE_RATE,
+    numThreads: 1,
+    debug: 0,
+  };
+}
+
+/** 按注册表 engine 装配 OfflineRecognizer 的 modelConfig（各引擎的文件角色与字段不同）。评测脚本复用。 */
+export function buildModelConfig(
   modelsDir: string,
   spec: AsrModelSpec,
   language: AsrLang,
@@ -98,19 +115,7 @@ export class TranscriptionPipeline {
     this.fixedLang = spec.engine === 'senseVoice' ? null : spec.languages[0];
 
     this.vad = new Vad(
-      {
-        sileroVad: {
-          model: path.join(modelsDir, SILERO_VAD.filename),
-          // 偏低的阈值让 VAD 更早进入语音状态，减少句首被截断
-          threshold: 0.35,
-          minSpeechDuration: 0.25,
-          minSilenceDuration: MIN_SILENCE_SECONDS,
-          windowSize: VAD_WINDOW_SIZE,
-        },
-        sampleRate: SAMPLE_RATE,
-        numThreads: 1,
-        debug: 0,
-      },
+      buildVadConfig(modelsDir),
       120 // 内部环形缓冲区时长(秒)
     );
 

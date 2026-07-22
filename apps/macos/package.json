@@ -13,6 +13,7 @@
     "clean:settings": "bash scripts/clean.sh --settings",
     "clean:all": "bash scripts/clean.sh --all",
     "test-pipeline": "node scripts/build-test.mjs test/pipeline.ts && node dist-test/test/pipeline.js",
+    "eval-cer": "node scripts/build-test.mjs test/eval-cer.ts && node dist-test/test/eval-cer.js",
     "test-translate": "node scripts/build-test.mjs test/translate.ts && node dist-test/test/translate.js",
     "icons": "node scripts/gen-icon.mjs",
     "dist": "node scripts/package-mac.mjs",
