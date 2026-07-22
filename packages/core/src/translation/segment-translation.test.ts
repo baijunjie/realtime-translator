@@ -136,6 +136,51 @@ describe('反向翻译编排（translateFinalizedSegment）', () => {
     expect(emitted).toHaveLength(0);
   });
 
+  it('语种护栏：含假名的段被误判为 zh 时按 ja 处理——正向翻译母语，不触发错误的反向回显', async () => {
+    const reverse = createReverseTranslationContext();
+    reverse.lastForeignLang = 'ja'; // 此前正确识别过日语
+    // LID 误判：日语文本被标成 zh（母语）。无护栏时会反向翻译 zh→ja，引擎原样吐回日语原文。
+    const { requests } = await run({
+      segment: seg('zh', '嬉しいですね'),
+      nativeLang: 'zh',
+      asrLanguage: 'auto',
+      reverse,
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ source: 'ja', targetLang: 'zh', targetCode: 'zh' });
+  });
+
+  it('语种护栏：误判段也正确记录外语历史（假名段标 zh 仍记为 ja）', async () => {
+    const reverse = createReverseTranslationContext();
+    const { requests } = await run({
+      segment: seg('zh', 'おはようございます'),
+      nativeLang: 'zh',
+      asrLanguage: 'auto',
+      reverse,
+    });
+    // 修正为 ja → 视作外语：正向翻译 + 记录 lastForeignLang
+    expect(requests[0]).toMatchObject({ source: 'ja', targetLang: 'zh' });
+    expect(reverse.lastForeignLang).toBe('ja');
+  });
+
+  it('语种护栏：谚文修正为 ko；纯汉字文本保持模型判定不动', async () => {
+    const hangul = await run({
+      segment: seg('zh', '안녕하세요'),
+      nativeLang: 'zh',
+      asrLanguage: 'auto',
+      reverse: createReverseTranslationContext(),
+    });
+    expect(hangul.requests[0]).toMatchObject({ source: 'ko', targetLang: 'zh' });
+    // 纯汉字无法从文字系统分辨 zh/ja，不修正（母语段无外语历史 → 跳过）
+    const hanOnly = await run({
+      segment: seg('zh', '今天天气很好'),
+      nativeLang: 'zh',
+      asrLanguage: 'auto',
+      reverse: createReverseTranslationContext(),
+    });
+    expect(hanOnly.requests).toHaveLength(0);
+  });
+
   it('中文母语反向翻译到粤语历史（yue）：走翻译分支，不误判为同语言跳过', async () => {
     const reverse = createReverseTranslationContext();
     // 粤语与中文视作不同语言 → 记录 yue 为外语

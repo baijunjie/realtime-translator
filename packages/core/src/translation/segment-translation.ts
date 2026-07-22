@@ -32,6 +32,24 @@ export function resetReverseTranslationContext(ctx: ReverseTranslationContext): 
   ctx.lastForeignLang = null;
 }
 
+// 文字系统护栏用的判定：假名（平/片/音标扩展/半角）只出现在日语，谚文只出现在韩语；
+// 中英文文本不含二者，故据此修正语种是零误伤的。纯汉字文本 zh/ja/yue 无法从文字系统
+// 分辨，保持模型判定不动。
+const KANA_RE = /[぀-ヿㇰ-ㇿｦ-ﾟ]/;
+const HANGUL_RE = /[가-힣ᄀ-ᇿ㄰-㆏]/;
+
+/**
+ * 按文本的文字系统修正 ASR 检测语种（只做确定性修正）。
+ * SenseVoice auto 模式对短段/强切段的语种误判是已定性的主要错误来源，误判会沿翻译链路
+ * 放大成可见故障：日语段被误标成母语 zh 时，反向翻译把它按「zh→上一次外语(ja)」送翻，
+ * 引擎对已是日语的文本原样吐回，UI 出现「译文=原文」的怪行。
+ */
+export function guardAsrLang(text: string, lang: string): string {
+  if (KANA_RE.test(text)) return 'ja';
+  if (HANGUL_RE.test(text)) return 'ko';
+  return lang;
+}
+
 /** 注入给平台引擎的一次翻译请求。 */
 export interface SegmentTranslateRequest {
   /** 行 id，译文异步回填对应 */
@@ -104,9 +122,12 @@ export async function translateFinalizedSegment(
   const { segment } = opts;
   if (!opts.enabled) return;
 
+  // 先过文字系统护栏修正明显的语种误判，再解析翻译目标——误判的母语标记会触发错误的
+  // 反向翻译（译文=原文回显），误判的外语标记会污染 lastForeignLang。
+  const sourceLang = guardAsrLang(segment.text, segment.lang);
   // 目标语言解析须在任何 await 之前同步完成（reverse 状态按段序累计）。
-  const targetLang = resolveTargetLang(opts, segment.lang);
-  const plan = planTranslation(opts.spec, segment.lang, targetLang, segment.text);
+  const targetLang = resolveTargetLang(opts, sourceLang);
+  const plan = planTranslation(opts.spec, sourceLang, targetLang, segment.text);
   if (plan.kind === 'skip') return;
   if (plan.kind === 'script') {
     opts.emitTranslation({ id: segment.id, text: plan.text });
@@ -118,7 +139,7 @@ export async function translateFinalizedSegment(
     const text = await opts.translate({
       id: segment.id,
       text: segment.text,
-      source: segment.lang,
+      source: sourceLang,
       targetLang: plan.targetLang,
       targetCode: plan.targetCode,
     });

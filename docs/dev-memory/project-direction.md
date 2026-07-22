@@ -139,6 +139,7 @@ realtime-translator（曾名 meeting-translator）是用户要分发给他人使
 - 实现全落在 `@rt/core` 翻译编排（三端一致）：`planTranslation` 泛化——第 3 参 `nativeLang`→`targetLang`（翻向任意目标，判定逻辑不变），并抽出 `langIdentity(spec,lang)`（yue≠zh 的身份判定复用）。`segment-translation.ts` 新增 `ReverseTranslationContext`（`{ lastForeignLang }`）+ `createReverseTranslationContext()`，`translateFinalizedSegment` 在**任何 await 之前同步**跑 `resolveTargetLang`：外语段→记录 lastForeignLang、正向翻母语；母语段→仅当 `asrLanguage==='auto'` 且有外语历史时目标改为该外语，否则仍以母语为目标（→ 原 skip/script）。
 - 状态载体是**各端桥接持有的模块级单例**（macOS main / web / iOS bridge 各 `const reverseCtx = createReverseTranslationContext()`，随 `asrLanguage`+`reverse` 一起传入）；**外语历史只在本次录音会话内有效**——三端在 `startPipeline` / `pipeline:start` 入口调 `resetReverseTranslationContext(reverseCtx)` 清空，故会话第一句若是母语则无可翻外语、直接不翻。未传 `reverse` 即关闭反向翻译（向后兼容）。
 - 反向目标沿用检测到的源码：目标 en/ja/ko 无 toScript（不会把日文误做简体归一化）；yue 历史时 targetCode 回落 'zh' 但 targetLang 仍 'yue'（云端提示词据之产出粤语），属可接受边角。测试见 `segment-translation.test.ts`。
+- **语种护栏（2026-07-22，用户实测截图定性）**：auto 模式 LID 误判会被反向翻译放大成可见故障——日语段误标 zh（母语）→ 按「zh→上一次外语(ja)」送翻 → 引擎对已是日语的文本原样吐回 → UI 出现「译文=原文」的怪行。修复：`translateFinalizedSegment` 入口先经 `guardAsrLang` 按文字系统做零误伤的确定性修正（含假名→ja、含谚文→ko；纯汉字 zh/ja/yue 无法分辨，保持模型判定），修正后语种统一用于目标解析、外语历史记录与引擎请求。纯汉字段的误判（zh↔ja 汉字句）护栏无法覆盖，属残余风险，长期解法是「语种判定约束到语言对」（backlog）。
 
 **Why:** 这些是对话里反复权衡过的方向性结论，避免以后重新讨论或推荐已否决的方案。
 **How to apply:** 后续功能开发不要引入云端 STT、不要再加声纹说话人区分；推荐方案时记得用户的硬性约束是"普通用户开箱即用"。调识别准确率先跑 CER 评测留基线再动参数（`pnpm --filter @rt/macos eval-cer`，见 [asr-eval](asr-eval.md)）；新增 ASR 模型只加一份 `AsrModelSpec`（platforms 按端实测标注）。
