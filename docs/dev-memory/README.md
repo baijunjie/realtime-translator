@@ -1,0 +1,6 @@
+- [project-direction](project-direction.md) — realtime-translator 的产品方向、技术选型理由和已否决的方案
+- [model-config](model-config.md) — 模型统一清单 / 下载源治理 / 多源 fallback / 内存能力门槛 / iOS 代码生成的结构与红线
+- [download-ux](download-ux.md) — 后台下载管理器 / 三端取消（cancelModelDownload）/ 录音等待 / 续传现状
+- [web-cache-probe](web-cache-probe.md) — web 模型管理页的缓存探测红线（cache.keys 不用 cache.match）/ 列表单例缓存 / v-if 重挂载陷阱
+- [asr-eval](asr-eval.md) — ASR 识别准确率 CER 评测基建（eval-cer）的用法、用例格式、指标解读与首批发现
+- [pipeline-recant](pipeline-recant.md) — agreement 管线「模型翻供」三缺陷的定性与修复（重基/定稿择长/标点容忍对齐/停滞分流）
