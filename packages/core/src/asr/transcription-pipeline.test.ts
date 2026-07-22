@@ -323,7 +323,7 @@ describe('一致前缀提交（LocalAgreement-2）', () => {
     expect(h.segments[0].text).toBe('前半部分の続きです');
   });
 
-  it('定稿 tail 与已提交前缀不一致（坍缩）→ 保底取已提交前缀', () => {
+  it('定稿 tail 与已提交前缀不一致且更短（坍缩）→ 保底取已提交前缀', () => {
     const h = makeHarness();
     h.engine.result = { text: '完全な文章です', lang: '<|ja|>' };
     h.feed(2, true); // 提交「完全な文章です」
@@ -331,6 +331,17 @@ describe('一致前缀提交（LocalAgreement-2）', () => {
     h.feed(0.5, false); // 定稿坍缩，弃 tail 保底
     expect(h.segments).toHaveLength(1);
     expect(h.segments[0].text).toBe('完全な文章です');
+  });
+
+  it('定稿 tail 与已提交前缀不一致但更长（表记改写）→ 取 tail，整句不丢', () => {
+    const h = makeHarness();
+    h.engine.result = { text: 'みなさんこんにちは', lang: '<|ja|>' };
+    h.feed(2, true); // 提交「みなさんこんにちは」
+    // 定稿解码把前缀改写（み→皆）并覆盖后续整句：是对同一段音频更完整的一次性解码
+    h.engine.result = { text: '皆さんこんにちは、本日はよろしく', lang: '<|ja|>' };
+    h.feed(0.5, false);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('皆さんこんにちは、本日はよろしく');
   });
 
   it('句末标点随窗口增长被改写（。→、）不卡死提交', () => {
@@ -409,22 +420,43 @@ describe('长行强切', () => {
   });
 });
 
-describe('agreement 滑动守卫', () => {
-  it('翻供 tick（解码不以已提交前缀开头）不滑动窗口，即使对齐结果达到滑动阈值', () => {
+describe('翻供重基（模型改写窗口内已提交前缀）', () => {
+  it('新读法连续两次一致且更长：重基前缀恢复提交与滑动，定稿采用新读法无丢失', () => {
     const h = makeRampHarness();
-    // 前 2s 稳定解出「あいう」并提交；之后翻供为完全不同的文本，其 token 时间戳跨 3s+
-    // （若不加守卫，按码点数对齐会得到 endSec≥3 → 误滑）
+    const oldReading = scheduleDecode(Array.from('あいう').map((ch, i) => ({ t: i * 0.4, ch })));
+    const newReading = scheduleDecode(
+      Array.from('かきくけこさしすせそ').map((ch, i) => ({ t: i * 0.4, ch })),
+    );
+    // 前 2s 解出旧读法并提交；之后模型对同一段音频整体翻供为更长的新读法且保持稳定
+    // （对应实测的 み→皆 表记改写：拒绝重基会永久卡死提交，最终停滞丢弃整句）
+    h.engine.respond = (s, e) => (e <= 2.0 ? oldReading(s, e) : newReading(s, e));
+    h.feed(6, true);
+    h.feed(0.6, false);
+
+    expect(h.segments).toHaveLength(1);
+    // 旧读法被新读法整体取代，行内容完整（无卡死 → 无停滞丢弃）
+    expect(h.segments[0].text).toBe('かきくけこさしすせそ');
+    // 重基后提交恢复流动，窗口继续滑动（未卡死在行首）
+    expect(h.engine.calls.some((c) => c.startSec >= 3)).toBe(true);
+  });
+
+  it('坍缩型翻供（输出变短）：不重基不滑动，定稿保底已提交前缀', () => {
+    const h = makeRampHarness();
+    const fullReading = scheduleDecode(
+      Array.from('あいうえおかき').map((ch, i) => ({ t: i * 0.2, ch })),
+      0.2,
+    );
+    // 前 2.5s 稳定解出完整读法并提交；之后解码坍缩为固定短文本（污染窗口的典型退化）
     h.engine.respond = (s, e) =>
-      e <= 2.0
-        ? { text: 'あいう', tokens: ['あ', 'い', 'う'], timestamps: [0, 0.4, 0.8], durations: [0.4, 0.4, 0.4] }
-        : { text: 'ワンツー', tokens: ['ワ', 'ン', 'ツ'], timestamps: [0, 1.5, 2.9], durations: [0.4, 0.4, 0.4] };
+      e <= 2.5
+        ? fullReading(s, e)
+        : { text: 'はい', tokens: ['は', 'い'], timestamps: [0, 0.4], durations: [0.4, 0.4] };
     h.feed(4.5, true);
-    // 从未滑动：所有解码窗口都自行首
+    // 坍缩文本从不推进滑动：所有解码窗口都自行首
     expect(h.engine.calls.every((c) => c.startSec === 0)).toBe(true);
     h.feed(0.6, false);
-    // 定稿保底：tail 翻供 → 保留已提交前缀，翻供文本不进定稿
     expect(h.segments).toHaveLength(1);
-    expect(h.segments[0].text).toBe('あいう');
+    expect(h.segments[0].text).toBe('あいうえおかき');
   });
 });
 

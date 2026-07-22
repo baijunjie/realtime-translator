@@ -3,10 +3,14 @@
 // 流程: 音频 -> Silero VAD 切出语音段 -> 滑动窗口解码 + 按模型分流的文本提交
 //
 // 行内文本提交按模型解码特性分两种策略（AsrModelSpec.commitStrategy，构造时注入）：
-// - agreement（一致前缀提交，LocalAgreement-2）：适用解码前缀对增长窗口单调稳定的
-//   非自回归模型（SenseVoice/paraformer）。对随提交前移的窗口反复解码，只把「连续
-//   两次解码一致的前缀」当作已提交文本单调落定；已提交音频随窗口滑出解码输入，
+// - agreement（一致前缀提交，LocalAgreement-2）：适用解码前缀对增长窗口基本稳定的
+//   非自回归模型（SenseVoice/paraformer）。对随提交前移的窗口反复解码，把「连续
+//   两次解码一致的前缀」当作已提交文本落定；已提交音频随窗口滑出解码输入，
 //   交叠语音污染的窗口前缀由此被逐出，不再随窗口增长而放大坍缩。
+//   窗口内前缀并非绝对单调：模型会随窗口增长合法改写已出内容（み↔皆、插入读点、
+//   ITN 数字改写），拒绝改写会永久卡死提交、最终由停滞保护丢弃整句音频（TTS ja 实录）。
+//   故当新读法连续两次一致且覆盖内容更多时，整体重基窗口内已提交前缀；已滑出窗口的
+//   定稿文本（committedDone）永不回退，坍缩型翻供（输出变短）也仍被拒绝。
 // - chunk（定长分块提交）：适用增长窗口下输出非单调、会震荡坍缩的自回归 transducer
 //   （zipformer/NeMo TDT）。行内 tick 解码只用于展示、不做前缀落定；窗口积累到定长
 //   就把当次解码整块提交，切点选在块尾 token 间隙最大处（近似词边界），窗口前移。
@@ -56,8 +60,8 @@ const WINDOW_COMMIT_SLIDE_MIN_SECONDS = 1;
 // token 的起音正好保留在新窗口内）。故不留回退余量。
 const SLIDE_SAFETY_SECONDS = 0;
 
-// 停滞保护：窗口超过该时长且连续多个 tick 无提交进展（音频确实解不出）时，强制把窗口
-// 前移到 now-STALL_KEEP，放弃解不出的音频段，防止窗口无界增长。
+// 停滞保护：窗口超过该时长且连续多个 tick 停滞（无提交进展，或有提交但窗口滑不动）时
+// 强制前移窗口，防止无界增长；两种停滞的前移点不同，见 maybeStall。
 const STALL_WINDOW_SECONDS = 8;
 const STALL_KEEP_SECONDS = 4;
 const STALL_MIN_TICKS = 3;
@@ -177,13 +181,23 @@ function trimTrailingUnstable(text: string): string {
   return text.replace(TRAILING_UNSTABLE_RE, '');
 }
 
+// 对齐时 committed 侧可跳过的字符：标点/符号/空白是模型在 text 里补的（tokens 侧没有），
+// 逐字比对时绕过它们。
+const SKIPPABLE_RE = /[\s\p{P}\p{S}]/u;
+
 /**
  * 用 tokens/timestamps 定位「已提交前缀 committed」覆盖到的最后一个完整 token：
- * 逐 token 累加重建文本（BPE 词边界 ▁ 还原为空格），找到累计码点数不超过 committed
- * 码点数的最后一个 token，返回 { cutLen, endSec }：
- *   cutLen —— 该 token 结束处的码点数（<= committed 码点数）；
+ * 逐 token 将其表面文本（BPE 词边界 ▁ 还原为空格）与 committed 逐字比对，返回
+ * { cutLen, endSec }：
+ *   cutLen —— 最后一个完整匹配 token 消耗到的 committed 码点数（含跳过的标点）；
  *   endSec —— 该 token 结束时间（秒，相对本次解码输入起点，取下一 token 起点为其末尾）。
- * tokens/timestamps 缺失或长度不匹配时返回 null（调用方走 fallback，不滑动）。
+ * 比对做标点容忍：committed（来自 text）里有模型补的标点而 tokens 没有，committed 侧的
+ * 标点/空白可跳过；token 侧的空白（拉丁词边界）在 text 侧已归一化，也可跳过。
+ * 真正的表面分歧（如 ITN 把「八十」改写为「80」）在分歧 token 处停止——切点只推进到
+ * 分歧前的最后一个完整 token，绝不按码点数硬对齐（那会把切点定在错误的音频位置，
+ * 滑出未提交音频或让已提交音频被重复解码提交）。
+ * tokens/timestamps 缺失、长度不匹配或首 token 即分歧时返回 null（本 tick 不滑动，
+ * 窗口增长由停滞保护兜底）。
  */
 function alignCommitted(
   committed: string,
@@ -194,27 +208,41 @@ function alignCommitted(
   if (!tokens || !timestamps || tokens.length === 0 || timestamps.length !== tokens.length) {
     return null;
   }
-  const target = Array.from(committed).length;
-  let acc = 0;
+  const cps = Array.from(committed);
+  let pos = 0; // 已消耗的 committed 码点数
   let lastIdx = -1;
-  for (let i = 0; i < tokens.length; i++) {
+  let cutLen = 0;
+  for (let i = 0; i < tokens.length && pos < cps.length; i++) {
     let surf = tokens[i].replace(WORD_BOUNDARY, ' ');
-    // sherpa 的 text 字段会 trim 首个词边界产生的前导空格，重建时同样去掉，避免拉丁文本错位 1 位
+    // sherpa 的 text 字段会 trim 首个词边界产生的前导空格，比对时同样去掉，避免拉丁文本错位 1 位
     if (i === 0) surf = surf.replace(/^ /, '');
-    const len = Array.from(surf).length;
-    if (acc + len <= target) {
-      acc += len;
-      lastIdx = i;
-    } else {
-      break;
+    let p = pos;
+    let ok = true;
+    for (const ch of surf) {
+      if (p < cps.length && cps[p] === ch) {
+        p++;
+        continue;
+      }
+      if (/\s/.test(ch)) continue; // token 侧空白在 text 侧已被归一化剥除
+      while (p < cps.length && SKIPPABLE_RE.test(cps[p]) && cps[p] !== ch) p++; // 跳过 committed 侧标点
+      if (p < cps.length && cps[p] === ch) p++;
+      else {
+        ok = false;
+        break;
+      }
     }
+    // 表面分歧（ITN 等）或 committed 在 token 中途耗尽：切点停在上一个完整 token
+    if (!ok) break;
+    pos = p;
+    lastIdx = i;
+    cutLen = pos;
   }
   if (lastIdx < 0) return null;
   const endSec =
     lastIdx + 1 < timestamps.length
       ? timestamps[lastIdx + 1]
       : timestamps[lastIdx] + (durations?.[lastIdx] ?? 0.2);
-  return { cutLen: acc, endSec };
+  return { cutLen, endSec };
 }
 
 /**
@@ -355,6 +383,7 @@ export class TranscriptionPipeline {
   private prevDecode: string | null = null; // 上一次解码文本（同一 windowStart 下才可比）
   private lineLang: string | null = null; // 本行语言（取首个非空解码的 lang）
   private noProgressTicks = 0; // 连续无提交进展的 tick 数（停滞保护用）
+  private noAdvanceTicks = 0; // 连续窗口未前移的 tick 数（滑动受阻保护用）
 
   constructor(
     engine: AsrInferenceEngine,
@@ -446,6 +475,7 @@ export class TranscriptionPipeline {
     this.prevDecode = null;
     this.lineLang = null;
     this.noProgressTicks = 0;
+    this.noAdvanceTicks = 0;
   }
 
   /**
@@ -524,15 +554,19 @@ export class TranscriptionPipeline {
       const progressed = this.chunkTick(cur, now);
       // chunk 的 fallback（确认无时间戳）不做停滞前移：窗口解码已被尾部截断限界，前移
       // 反而会丢弃 finalize 时本可整体补解的音频（agreement 的停滞不丢已提交文本，不受此限）。
-      if (this.engineHasTimestamps !== false) this.maybeStall(now, false, progressed);
+      // chunk 的块提交即窗口前移，progressed 同时充当 advanced。
+      if (this.engineHasTimestamps !== false) this.maybeStall(now, progressed, progressed);
       return;
     }
 
-    // 一致前缀单调提交：agreed 以 committedInWindow 为前缀且更长才落定；模型翻供则保持不动。
-    // 提交前剥离尾部标点/空白，避免句末标点被改写后卡死提交（见 trimTrailingUnstable）。
+    // 一致前缀提交：agreed 比 committedInWindow 更长即落定——以 committedInWindow 为
+    // 前缀是正常顺延；不以其为前缀是模型翻供出了更长的稳定新读法（连续两次一致），
+    // 整体重基窗口内前缀（见文件头，拒绝重基会卡死提交）。坍缩型翻供（agreed 更短）
+    // 不满足条件，保持不动。提交前剥离尾部标点/空白，避免句末标点被改写后卡死提交
+    // （见 trimTrailingUnstable）。
     const agreed = trimTrailingUnstable(commonCodePointPrefix(this.prevDecode ?? '', cur.text));
     let progressed = false;
-    if (agreed.length > this.committedInWindow.length && agreed.startsWith(this.committedInWindow)) {
+    if (agreed.length > this.committedInWindow.length) {
       this.committedInWindow = agreed;
       progressed = true;
     }
@@ -582,8 +616,8 @@ export class TranscriptionPipeline {
    */
   private trySlide(cur: RawDecode, now: number): boolean {
     if (this.engineHasTimestamps !== true || this.committedInWindow === '') return false;
-    // 翻供 tick 不滑动：cur 不以已提交前缀开头时，其 token 序列与已提交文本并不对应，
-    // 按码点数对齐会用错时间戳、把尚未提交的音频误切出窗口。
+    // 翻供 tick 不滑动：cur 不以已提交前缀开头时，其 token 序列与已提交文本不对应，
+    // 对齐无意义（若新读法持续，下一 tick 重基前缀后滑动自然恢复）。
     if (!cur.text.startsWith(this.committedInWindow)) return false;
     const aligned = alignCommitted(this.committedInWindow, cur.tokens, cur.timestamps, cur.durations);
     const winLen = (now - this.windowStart) / SAMPLE_RATE;
@@ -604,24 +638,28 @@ export class TranscriptionPipeline {
   }
 
   /**
-   * 停滞保护：窗口超 STALL_WINDOW 且连续多个 tick 无提交进展（音频确实解不出）时，强制把
-   * windowStart 前移到 now-STALL_KEEP，放弃解不出的音频段，防止窗口无界增长。
+   * 停滞保护：窗口超 STALL_WINDOW 且连续多个 tick 满足任一停滞条件时强制前移窗口，
+   * 防止窗口无界增长。已提交文本一律不丢（转入 committedDone）。两种停滞的前移点不同：
+   * - 无提交进展（音频确实解不出）：前移到 now-STALL_KEEP，保留短尾巴等它解出来；
+   * - 有提交进展但窗口滑不动（对齐持续失败，如 ITN 让 text 与 tokens 表面脱节）：
+   *   直接前移到 now——保留的音频会被重新解码、以「已提交文本+重解文本」的形式重复
+   *   定稿；未提交尾巴只落后解码头 1~2 个 tick，弃之损失更小。
    */
-  private maybeStall(now: number, slid: boolean, progressed: boolean): void {
-    if (slid || progressed) {
-      this.noProgressTicks = 0;
-      return;
-    }
-    this.noProgressTicks++;
+  private maybeStall(now: number, advanced: boolean, progressed: boolean): void {
+    this.noAdvanceTicks = advanced ? 0 : this.noAdvanceTicks + 1;
+    this.noProgressTicks = advanced || progressed ? 0 : this.noProgressTicks + 1;
     if (now - this.windowStart <= STALL_WINDOW_SECONDS * SAMPLE_RATE) return;
-    if (this.noProgressTicks < STALL_MIN_TICKS) return;
+    const noProgressStall = this.noProgressTicks >= STALL_MIN_TICKS;
+    if (!noProgressStall && this.noAdvanceTicks < STALL_MIN_TICKS) return;
 
-    // 已提交文本不丢（转入 committedDone），仅放弃 committed 之后确实解不出的音频。
     this.committedDone += this.committedInWindow;
     this.committedInWindow = '';
-    this.windowStart = Math.max(this.lineStart, now - Math.round(STALL_KEEP_SECONDS * SAMPLE_RATE));
+    this.windowStart = noProgressStall
+      ? Math.max(this.lineStart, now - Math.round(STALL_KEEP_SECONDS * SAMPLE_RATE))
+      : now;
     this.prevDecode = null;
     this.noProgressTicks = 0;
+    this.noAdvanceTicks = 0;
   }
 
   /**
@@ -643,11 +681,14 @@ export class TranscriptionPipeline {
     this.lineStart = boundary;
     this.committedDone = '';
     this.noProgressTicks = 0;
+    this.noAdvanceTicks = 0;
   }
 
   /**
    * 断行定稿：对未提交区 [windowStart, to] 做一次尾部解码。tail 以 committedInWindow 为前缀
-   * （正常延伸）则取 tail；否则取 committedInWindow（tail 坍缩，弃之保底）；committedInWindow
+   * （正常延伸）则取 tail；不一致时取两者中更长者——tail 坍缩（污染窗口下解码退化为
+   * 短输出）时保底取已提交前缀，tail 只是改写了前缀表记（み↔皆、读点、ITN）时它是对
+   * 同一段音频更完整的一次性解码，弃之会整句丢失（TTS ja 实录）。committedInWindow
    * 为空（含 chunk 模式——它没有窗口内前缀概念）时直接取 tail。行文本 =
    * clean(committedDone + 上述结果)；无字母/数字则丢弃（噪声 blip 过滤）。
    */
@@ -662,7 +703,11 @@ export class TranscriptionPipeline {
     let finalUncommitted: string;
     if (this.committedInWindow === '') finalUncommitted = tail.text;
     else if (tail.text.startsWith(this.committedInWindow)) finalUncommitted = tail.text;
-    else finalUncommitted = this.committedInWindow;
+    else
+      finalUncommitted =
+        Array.from(tail.text).length > Array.from(this.committedInWindow).length
+          ? tail.text
+          : this.committedInWindow;
 
     const lineText = cleanAsrText(this.committedDone + finalUncommitted);
     const lang = cleanLang(this.lineLang ?? tail.lang);
