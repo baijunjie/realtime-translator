@@ -38,6 +38,7 @@
     "@tailwindcss/vite": "catalog:",
     "@types/node": "catalog:",
     "@vitejs/plugin-vue": "catalog:",
+    "app-builder-bin": "5.0.0-alpha.10",
     "electron": "^42.4.0",
     "electron-builder": "^25.1.8",
     "electron-vite": "^5.0.0",
