@@ -78,7 +78,7 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   /// Earlier speech onset to avoid clipping the first syllable.
   private let vadThreshold: Float = 0.35
   private let minSpeechSeconds: Float = 0.25
-  /// Hard cap so a non-stop talker still gets periodic finals (sherpa cuts internally).
+  /// Hard cap enforced by this plugin so a non-stop talker cannot grow an unbounded decode window.
   private let maxSpeechSeconds: Float = 7.0
   /// How often to run a best-effort partial over the in-progress speech buffer (s).
   private let partialIntervalSeconds: Double = 0.6
@@ -115,6 +115,14 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   private var pendingSamples: [Float] = []
   /// Raw 16 kHz samples since the current speech segment (best-effort) started — used for partials.
   private var speechBuffer: [Float] = []
+  private struct RecognitionCandidate {
+    let text: String
+    let lang: String
+  }
+  /// Consecutive partial decodes provide the evidence used to protect a final from model collapse.
+  /// Text and language stay atomic because auto LID may change between decodes.
+  private var previousPartial: RecognitionCandidate?
+  private var stablePartial: RecognitionCandidate?
   private var wasSpeechDetected = false
   /// Total 16 kHz samples consumed since start() — used for partial throttling.
   private var totalSamples = 0
@@ -524,6 +532,8 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     segmentId = 0
     pendingSamples.removeAll(keepingCapacity: true)
     speechBuffer.removeAll(keepingCapacity: true)
+    previousPartial = nil
+    stablePartial = nil
     wasSpeechDetected = false
     totalSamples = 0
     lastPartialAtSamples = 0
@@ -569,10 +579,16 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
         // Onset of a new speech run.
         wasSpeechDetected = true
         speechBuffer.removeAll(keepingCapacity: true)
+        previousPartial = nil
+        stablePartial = nil
         lastPartialAtSamples = 0
       }
       speechBuffer.append(contentsOf: samples)
-      maybeEmitPartial()
+      if speechBuffer.count >= Int(maxSpeechSeconds * Float(sampleRate)) {
+        forceFinalizeSpeechBuffer()
+      } else {
+        maybeEmitPartial()
+      }
     } else if wasSpeechDetected {
       // Silence resumed — wait for the VAD to close the segment(s) above.
       wasSpeechDetected = false
@@ -589,8 +605,38 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     let result = recognizer.decode(samples: speechBuffer, sampleRate: sampleRate)
     let text = cleanAsrText(result.text)
     if !text.isEmpty {
+      let current = RecognitionCandidate(text: text, lang: normalizeLang(result.lang))
+      if let previous = previousPartial {
+        let agreed = trimTrailingUnstable(commonPrefix(previous.text, current.text))
+        if !agreed.isEmpty && previous.lang == current.lang {
+          if let stable = stablePartial,
+             stable.lang != current.lang || !stable.text.hasPrefix(agreed) {
+            stablePartial = RecognitionCandidate(text: agreed, lang: current.lang)
+          } else if agreed.count > (stablePartial?.text.count ?? 0) {
+            stablePartial = RecognitionCandidate(text: agreed, lang: current.lang)
+          }
+        }
+      }
+      previousPartial = current
       notifyListeners("partial", data: ["text": text])
     }
+  }
+
+  /// Ask VAD to close its current segment so continuous speech cannot make every subsequent partial
+  /// re-decode an ever-growing window. Flushing preserves the VAD's pre-roll audio and sample clock;
+  /// resetting here would clip the next segment's onset and make its timestamp jump backwards.
+  private func forceFinalizeSpeechBuffer() {
+    guard !speechBuffer.isEmpty, let vad = vad else { return }
+    vad.flush()
+    while !vad.isEmpty() {
+      let segment = vad.front()
+      vad.pop()
+      finalizeSegment(samples: segment.samples, startSample: segment.start)
+    }
+    notifyListeners("partial", data: ["text": ""])
+    speechBuffer.removeAll(keepingCapacity: true)
+    wasSpeechDetected = false
+    lastPartialAtSamples = totalSamples
   }
 
   /// On stop(): flush the VAD and finalize any segment still buffered.
@@ -603,6 +649,8 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
       finalizeSegment(samples: segment.samples, startSample: segment.start)
     }
     speechBuffer.removeAll(keepingCapacity: true)
+    previousPartial = nil
+    stablePartial = nil
     wasSpeechDetected = false
   }
 
@@ -611,9 +659,20 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
   private func finalizeSegment(samples: [Float], startSample: Int) {
     guard let recognizer = recognizer, !samples.isEmpty else { return }
     let result = recognizer.decode(samples: samples, sampleRate: sampleRate)
-    let text = cleanAsrText(result.text)
+    let decodedText = cleanAsrText(result.text)
+    let decoded = RecognitionCandidate(text: decodedText, lang: normalizeLang(result.lang))
+    // Only a prefix supported by consecutive partials may override a collapsed final. This avoids
+    // turning one transient long hallucination into permanent confirmed text.
+    let chosen: RecognitionCandidate
+    if let stable = stablePartial, stable.text.count > decoded.text.count {
+      chosen = stable
+    } else {
+      chosen = decoded
+    }
+    previousPartial = nil
+    stablePartial = nil
     // Skip empty / punctuation-only segments (short noises often decode to "。").
-    guard hasLetterOrNumber(text) else { return }
+    guard hasLetterOrNumber(chosen.text) else { return }
 
     let id = segmentId
     segmentId += 1
@@ -621,9 +680,9 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
     let duration = Double(samples.count) / Double(sampleRate)
     notifyListeners("segment", data: [
       "id": id,
-      "text": text,
+      "text": chosen.text,
       // SenseVoice lang short code: zh/en/ja/yue/ko. Defensively strip any <|..|>
-      "lang": normalizeLang(result.lang),  // wrapping so output matches macOS's normalized form.
+      "lang": chosen.lang,
       "start": start,
       "duration": duration,
     ])
@@ -957,6 +1016,28 @@ public class RealtimeAsrPlugin: CAPPlugin, CAPBridgedPlugin {
 
   private func cleanAsrText(_ text: String) -> String {
     return collapseRepeats(stripCjkSpaces(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+  }
+
+  private func commonPrefix(_ lhs: String, _ rhs: String) -> String {
+    var result: [Character] = []
+    for (a, b) in zip(lhs, rhs) {
+      if a != b { break }
+      result.append(a)
+    }
+    return String(result)
+  }
+
+  private func trimTrailingUnstable(_ text: String) -> String {
+    var chars = Array(text)
+    while let last = chars.last,
+          last.unicodeScalars.allSatisfy({
+            CharacterSet.whitespacesAndNewlines.contains($0)
+              || CharacterSet.punctuationCharacters.contains($0)
+              || CharacterSet.symbols.contains($0)
+          }) {
+      chars.removeLast()
+    }
+    return String(chars)
   }
 
   private func hasLetterOrNumber(_ text: String) -> Bool {

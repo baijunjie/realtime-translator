@@ -344,6 +344,31 @@ describe('一致前缀提交（LocalAgreement-2）', () => {
     expect(h.segments[0].text).toBe('皆さんこんにちは、本日はよろしく');
   });
 
+  it('段尾单次解码坍缩时保留识别区已经展示过的完整候选', () => {
+    const h = makeHarness();
+    h.engine.result = { text: '本日は会議の進捗状況を確認します', lang: '<|ja|>' };
+    h.feed(0.7, true); // 只产生一次长候选，尚未达到 LocalAgreement-2 的两次一致
+    expect(h.partials).toContain('本日は会議の進捗状況を確認します');
+
+    h.engine.result = { text: '本日は会議', lang: '<|ja|>' };
+    h.feed(0.5, false); // 静音触发的段尾重解码坍缩
+
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('本日は会議の進捗状況を確認します');
+  });
+
+  it('后续稳定前缀与早期长候选冲突时丢弃长候选', () => {
+    const h = makeHarness();
+    h.engine.result = { text: '誤って長く幻聴した文章', lang: '<|ja|>' };
+    h.feed(0.7, true);
+    h.engine.result = { text: '正しい短文', lang: '<|ja|>' };
+    h.feed(1.4, true); // 连续两次相同读法，形成新的稳定前缀
+    h.feed(0.5, false);
+
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe('正しい短文');
+  });
+
   it('句末标点随窗口增长被改写（。→、）不卡死提交', () => {
     const h = makeHarness();
     h.engine.result = { text: 'こんにちは。', lang: '<|ja|>' };
@@ -383,6 +408,44 @@ describe('窗口滑动（污染逐出）', () => {
     // 无丢失：定稿文本 = 截至段尾的完整虚拟转写
     expect(h.segments).toHaveLength(1);
     expect(h.segments[0].text).toBe(virtualUpTo(6.0));
+  });
+
+  it('收缩 tick 触发滑动时从历史最佳候选裁剪，定稿不丢已展示的尾巴', () => {
+    const h = makeRampHarness();
+    const prefix = 'あいう';
+    const longTail = 'えおかきく';
+    const shortTail = 'え';
+    h.engine.respond = (startSec, endSec) => {
+      if (startSec > 0.1) {
+        return { text: shortTail, tokens: [shortTail], timestamps: [0], durations: [0.2] };
+      }
+      if (endSec < 5.8) {
+        return {
+          text: prefix,
+          tokens: Array.from(prefix),
+          timestamps: [0, 0.3, 0.6],
+          durations: [0.2, 0.2, 0.2],
+        };
+      }
+      const tail = endSec < 6.4 ? longTail : shortTail;
+      return {
+        text: prefix + tail,
+        tokens: [...Array.from(prefix), ...Array.from(tail)],
+        // 长候选 tick 尚不足压力滑动阈值；下一次收缩 tick 将首个尾字推迟到 1.2s，触发滑动。
+        timestamps: [0, 0.3, 0.6, endSec < 6.4 ? 0.8 : 1.2, 1.5, 1.8, 2.1, 2.4].slice(
+          0,
+          prefix.length + tail.length,
+        ),
+        durations: Array(prefix.length + tail.length).fill(0.2),
+      };
+    };
+
+    h.feed(6.6, true);
+    h.feed(0.5, false);
+
+    expect(h.engine.calls.some((call) => call.startSec >= 1)).toBe(true);
+    expect(h.segments).toHaveLength(1);
+    expect(h.segments[0].text).toBe(prefix + longTail);
   });
 });
 

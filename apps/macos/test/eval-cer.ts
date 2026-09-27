@@ -8,6 +8,8 @@
 //                      用于量化「锁定语言 vs auto」的准确率差）
 //   --cases <dir>      用例目录（默认 test-audio/eval，相对 app 根）
 //   --dump             额外打印每个用例的参考文本与两种识别结果，供人工核对
+//   --max-cer <pct>     任一模型的 pipeline 加权 CER 超过该百分比时退出失败
+//   --max-drift <pct>   任一模型的「实时最佳→最终确认」加权漂移超过该百分比时退出失败
 //
 // 用例目录约定（每个用例一组同名文件）：
 //   <name>.wav    16kHz 单声道 PCM WAV（转换: afconvert -f WAVE -d LEI16@16000 -c 1 in.wav out.wav）
@@ -15,10 +17,12 @@
 //   <name>.json   可选元数据 { "lang": "zh" }——声明后 zh 用例对比前做简体归一化，
 //                 并统计 senseVoice auto 模式下按段的语种误判数（LID）
 //
-// 每个 用例×模型 报告两个 CER：
+// 每个 用例×模型 报告两个 CER 和一个交互稳定性指标：
 //   pipeline —— 产品同款实时管线（流式喂入 + 滑动窗口提交），即用户实际看到的准确率
 //   offline  —— 同一模型对 VAD 切出的整段做一次性离线解码（非流式上限），
 //               两者之差即实时管线本身引入的损耗
+//   final drift —— 每段实时展示过的最长文本到最终确认文本的编辑距离；它不代表准确率，
+//                 专门捕获「识别区一整段，确认时突然变短/变样」这类体验回归
 // 注意：自回归 transducer（reazon/parakeet）对过长段会整块坍缩（见 dev-memory），
 // offline 一列对这类模型只在段长可控时才是可信上限。
 // CER 归一化：NFKC + 小写 + 去空白/标点/符号（英文因此近似字符级对比），编辑距离按码点计。
@@ -34,6 +38,7 @@ import {
   requiredAsrFiles,
   SAMPLE_RATE,
   VAD_WINDOW_SIZE,
+  FinalizationDriftTracker,
   type AsrLang,
   type SegmentPayload,
 } from '@rt/core';
@@ -49,6 +54,8 @@ interface CliArgs {
   language: AsrLang;
   casesDir: string;
   dump: boolean;
+  maxCer?: number;
+  maxDrift?: number;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -65,6 +72,8 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--language') args.language = (argv[++i] ?? 'auto') as AsrLang;
     else if (a === '--cases') args.casesDir = path.resolve(appRoot, argv[++i] ?? '');
     else if (a === '--dump') args.dump = true;
+    else if (a === '--max-cer') args.maxCer = parsePercent(argv[++i], a);
+    else if (a === '--max-drift') args.maxDrift = parsePercent(argv[++i], a);
     else {
       console.error(`未知参数: ${a}`);
       process.exit(1);
@@ -77,6 +86,15 @@ function parseArgs(argv: string[]): CliArgs {
     ).map((m) => m.id);
   }
   return args;
+}
+
+function parsePercent(value: string | undefined, flag: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    console.error(`${flag} 需要非负百分比数字`);
+    process.exit(1);
+  }
+  return parsed;
 }
 
 // ===== 用例发现 =====
@@ -177,11 +195,19 @@ interface RunResult {
   segLangs: string[];
   /** 处理耗时 / 音频时长 */
   rtf: number;
+  /** 实时展示的最佳候选到最终确认文本的加权编辑距离 */
+  finalDrift: CerResult;
 }
 
 /** 产品同款实时管线：流式喂入 100ms 块，收集定稿段（与 App 内录音路径一致）。 */
-function runPipeline(pipeline: TranscriptionPipeline, sink: SegmentPayload[], c: EvalCase): RunResult {
+function runPipeline(
+  pipeline: TranscriptionPipeline,
+  sink: SegmentPayload[],
+  tracker: FinalizationDriftTracker,
+  c: EvalCase,
+): RunResult {
   sink.length = 0;
+  tracker.reset();
   pipeline.reset();
   const t0 = Date.now();
   const chunk = SAMPLE_RATE / 10;
@@ -189,11 +215,21 @@ function runPipeline(pipeline: TranscriptionPipeline, sink: SegmentPayload[], c:
     pipeline.acceptWaveform(c.samples.subarray(i, i + chunk));
   }
   pipeline.flush();
+  tracker.finish();
   const procSec = (Date.now() - t0) / 1000;
+  const finalDrift = tracker.pairs.reduce<CerResult>(
+    (sum, pair) => {
+      if (!pair.partial) return sum;
+      const one = cer(pair.final, pair.partial, c.lang);
+      return { dist: sum.dist + one.dist, refLen: sum.refLen + one.refLen };
+    },
+    { dist: 0, refLen: 0 },
+  );
   return {
     hyp: sink.map((s) => s.text).join(' '),
     segLangs: sink.map((s) => s.lang),
     rtf: procSec / (c.samples.length / SAMPLE_RATE),
+    finalDrift,
   };
 }
 
@@ -230,7 +266,12 @@ function runOffline(recognizer: OfflineRecognizer, c: EvalCase): RunResult {
   vad.flush();
   drain();
   const procSec = (Date.now() - t0) / 1000;
-  return { hyp: texts.join(' '), segLangs: [], rtf: procSec / (c.samples.length / SAMPLE_RATE) };
+  return {
+    hyp: texts.join(' '),
+    segLangs: [],
+    rtf: procSec / (c.samples.length / SAMPLE_RATE),
+    finalDrift: { dist: 0, refLen: 0 },
+  };
 }
 
 // ===== 主流程 =====
@@ -241,6 +282,7 @@ interface Row {
   durSec: number;
   pipe: CerResult;
   off: CerResult;
+  drift: CerResult;
   lid: string;
   rtf: number;
 }
@@ -269,8 +311,13 @@ function main(): void {
 
     console.log(`加载 ${modelId} ...`);
     const sink: SegmentPayload[] = [];
+    const tracker = new FinalizationDriftTracker(normalizeForCer);
     const pipeline = new TranscriptionPipeline(modelsDir, modelId, args.language, {
-      onSegment: (seg) => sink.push(seg),
+      onSegment: (seg) => {
+        sink.push(seg);
+        tracker.onSegment(seg.text);
+      },
+      onPartial: (partial) => tracker.onPartial(partial.text),
     });
     const offlineRecognizer = new OfflineRecognizer({
       featConfig: { sampleRate: SAMPLE_RATE, featureDim: 80 },
@@ -283,7 +330,7 @@ function main(): void {
         console.log(`跳过 ${c.name} × ${modelId}: 模型不支持语种 ${c.lang}`);
         continue;
       }
-      const pipeRun = runPipeline(pipeline, sink, c);
+      const pipeRun = runPipeline(pipeline, sink, tracker, c);
       const offRun = runOffline(offlineRecognizer, c);
       // LID 误判：仅 senseVoice + auto + 用例声明了语种时有意义（其余模型语种为注册表固定值）
       const lid =
@@ -296,6 +343,7 @@ function main(): void {
         durSec: c.samples.length / SAMPLE_RATE,
         pipe: cer(pipeRun.hyp, c.ref, c.lang),
         off: cer(offRun.hyp, c.ref, c.lang),
+        drift: pipeRun.finalDrift,
         lid,
         rtf: pipeRun.rtf,
       });
@@ -304,6 +352,10 @@ function main(): void {
         console.log(`REF : ${c.ref.trim()}`);
         console.log(`PIPE: ${pipeRun.hyp}`);
         console.log(`OFF : ${offRun.hyp}`);
+        for (const [i, pair] of tracker.pairs.entries()) {
+          console.log(`LIVE${i + 1}: ${pair.partial || '(无实时文本)'}`);
+          console.log(`FINAL${i + 1}: ${pair.final}`);
+        }
       }
     }
   }
@@ -313,16 +365,27 @@ function main(): void {
     process.exit(1);
   }
   printReport(rows, args.models);
+  enforceThresholds(rows, args.models, args.maxCer, args.maxDrift);
 }
 
 function printReport(rows: Row[], modelOrder: string[]): void {
-  const headers = ['用例', '模型', '时长', 'CER(pipeline)', 'CER(offline)', 'LID误判', 'RTF'];
+  const headers = [
+    '用例',
+    '模型',
+    '时长',
+    'CER(pipeline)',
+    'CER(offline)',
+    'Final漂移',
+    'LID误判',
+    'RTF',
+  ];
   const table: string[][] = rows.map((r) => [
     r.name,
     r.model,
     `${r.durSec.toFixed(1)}s`,
     pct(r.pipe),
     pct(r.off),
+    pct(r.drift),
     r.lid,
     r.rtf.toFixed(2),
   ]);
@@ -340,6 +403,7 @@ function printReport(rows: Row[], modelOrder: string[]): void {
       `${mine.reduce((s, r) => s + r.durSec, 0).toFixed(1)}s`,
       pct(total((r) => r.pipe)),
       pct(total((r) => r.off)),
+      pct(total((r) => r.drift)),
       '-',
       '-',
     ]);
@@ -361,8 +425,39 @@ function printReport(rows: Row[], modelOrder: string[]): void {
   for (const row of table) console.log(fmt(row));
   console.log(
     '\nCER(pipeline)=实时管线（产品实际），CER(offline)=VAD 切段整段离线解码（非流式上限），' +
-      '两者之差≈管线损耗。\nLID误判=senseVoice auto 模式下定稿段语种≠用例声明语种的段数。',
+      '两者之差≈管线损耗。\nFinal漂移=实时展示过的最长文本到最终确认文本的编辑距离，' +
+      '用于捕获确认时变短/变样；LID误判=senseVoice auto 模式下定稿段语种≠用例声明语种的段数。',
   );
+}
+
+function enforceThresholds(
+  rows: Row[],
+  modelOrder: string[],
+  maxCer?: number,
+  maxDrift?: number,
+): void {
+  if (maxCer === undefined && maxDrift === undefined) return;
+  let failed = false;
+  for (const modelId of modelOrder) {
+    const mine = rows.filter((row) => row.model === modelId);
+    if (mine.length === 0) continue;
+    const weighted = (pick: (row: Row) => CerResult): number => {
+      const dist = mine.reduce((sum, row) => sum + pick(row).dist, 0);
+      const refLen = mine.reduce((sum, row) => sum + pick(row).refLen, 0);
+      return refLen === 0 ? 0 : (dist / refLen) * 100;
+    };
+    const pipelineCer = weighted((row) => row.pipe);
+    const finalDrift = weighted((row) => row.drift);
+    if (maxCer !== undefined && pipelineCer > maxCer) {
+      console.error(`${modelId}: pipeline CER ${pipelineCer.toFixed(1)}% > ${maxCer}%`);
+      failed = true;
+    }
+    if (maxDrift !== undefined && finalDrift > maxDrift) {
+      console.error(`${modelId}: final drift ${finalDrift.toFixed(1)}% > ${maxDrift}%`);
+      failed = true;
+    }
+  }
+  if (failed) process.exitCode = 1;
 }
 
 main();

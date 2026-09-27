@@ -380,6 +380,9 @@ export class TranscriptionPipeline {
   private windowStart = 0; // 当前解码窗口起点（随提交前移）
   private committedDone = ''; // 已滑出窗口的已提交文本（原始，本行内单调只增）
   private committedInWindow = ''; // 当前窗口内已提交的前缀（原始）
+  // 当前窗口曾展示过的最完整候选。段尾重解码可能因静音补齐或窗口变长而突然坍缩，
+  // 定稿必须把用户已经看到且与稳定前缀一致的候选纳入比较，否则确认区会无依据地丢掉整段文字。
+  private bestWindowHypothesis = '';
   private prevDecode: string | null = null; // 上一次解码文本（同一 windowStart 下才可比）
   private lineLang: string | null = null; // 本行语言（取首个非空解码的 lang）
   private noProgressTicks = 0; // 连续无提交进展的 tick 数（停滞保护用）
@@ -472,6 +475,7 @@ export class TranscriptionPipeline {
   private resetLine(): void {
     this.committedDone = '';
     this.committedInWindow = '';
+    this.bestWindowHypothesis = '';
     this.prevDecode = null;
     this.lineLang = null;
     this.noProgressTicks = 0;
@@ -567,12 +571,22 @@ export class TranscriptionPipeline {
     const agreed = trimTrailingUnstable(commonCodePointPrefix(this.prevDecode ?? '', cur.text));
     let progressed = false;
     if (agreed.length > this.committedInWindow.length) {
+      if (this.bestWindowHypothesis && !this.bestWindowHypothesis.startsWith(agreed)) {
+        // 新的稳定前缀已经否定旧候选时立即失效；否则一次早期长幻听会压过后续多次一致的读法。
+        this.bestWindowHypothesis = '';
+      }
       this.committedInWindow = agreed;
       progressed = true;
     }
 
     // 展示（滑动前，用当前状态）：已提交前缀保持稳定，只让未提交尾巴闪动。
     const shown = cur.text.startsWith(this.committedInWindow) ? cur.text : this.committedInWindow;
+    if (
+      cur.text.startsWith(this.committedInWindow) &&
+      Array.from(cur.text).length > Array.from(this.bestWindowHypothesis).length
+    ) {
+      this.bestWindowHypothesis = cur.text;
+    }
     this.onPartial({ text: cleanAsrText(this.committedDone + shown) });
 
     this.prevDecode = cur.text;
@@ -627,9 +641,15 @@ export class TranscriptionPipeline {
         : WINDOW_COMMIT_SLIDE_SECONDS;
     if (!aligned || aligned.endSec < threshold) return false;
 
-    const cps = Array.from(this.committedInWindow);
+    const previousCommitted = this.committedInWindow;
+    const cps = Array.from(previousCommitted);
     this.committedDone += cps.slice(0, aligned.cutLen).join('');
     this.committedInWindow = cps.slice(aligned.cutLen).join('');
+    // 历史最佳候选若仍与已提交前缀兼容，应从它自身裁掉滑出的部分。用当前 cur 覆盖会在
+    // “先展示长句、下一 tick 收缩并触发滑动”时把刚保存的完整尾巴再次丢掉。
+    this.bestWindowHypothesis = this.bestWindowHypothesis.startsWith(previousCommitted)
+      ? Array.from(this.bestWindowHypothesis).slice(aligned.cutLen).join('')
+      : Array.from(cur.text).slice(aligned.cutLen).join('');
     const advance = Math.max(0, Math.round((aligned.endSec - SLIDE_SAFETY_SECONDS) * SAMPLE_RATE));
     this.windowStart += advance;
     // 窗口变了，旧解码不可比
@@ -654,6 +674,8 @@ export class TranscriptionPipeline {
 
     this.committedDone += this.committedInWindow;
     this.committedInWindow = '';
+    // 强制前移后无法可靠地把旧候选映射到保留的音频尾部，宁可让后续短窗重新建立证据。
+    this.bestWindowHypothesis = '';
     this.windowStart = noProgressStall
       ? Math.max(this.lineStart, now - Math.round(STALL_KEEP_SECONDS * SAMPLE_RATE))
       : now;
@@ -689,8 +711,9 @@ export class TranscriptionPipeline {
    * （正常延伸）则取 tail；不一致时取两者中更长者——tail 坍缩（污染窗口下解码退化为
    * 短输出）时保底取已提交前缀，tail 只是改写了前缀表记（み↔皆、读点、ITN）时它是对
    * 同一段音频更完整的一次性解码，弃之会整句丢失（TTS ja 实录）。committedInWindow
-   * 为空（含 chunk 模式——它没有窗口内前缀概念）时直接取 tail。行文本 =
-   * clean(committedDone + 上述结果)；无字母/数字则丢弃（噪声 blip 过滤）。
+   * agreement 模式还会纳入当前窗口曾展示过、且与当时稳定前缀一致的最完整候选，避免段尾
+   * 单次解码坍缩让确认区比识别区骤然变短。三者仍按完整度择优；chunk 模式没有该候选，
+   * 维持按块提交语义。行文本 = clean(committedDone + 上述结果)；无字母/数字则丢弃。
    */
   private finalizeLine(to: number): void {
     if (to <= this.lineStart) {
@@ -700,14 +723,13 @@ export class TranscriptionPipeline {
     this.partialFloor = to;
 
     const tail = this.decodeRaw(this.historySlice(this.windowStart, to));
-    let finalUncommitted: string;
-    if (this.committedInWindow === '') finalUncommitted = tail.text;
-    else if (tail.text.startsWith(this.committedInWindow)) finalUncommitted = tail.text;
-    else
-      finalUncommitted =
-        Array.from(tail.text).length > Array.from(this.committedInWindow).length
-          ? tail.text
-          : this.committedInWindow;
+    const candidates =
+      this.commitStrategy === 'agreement'
+        ? [this.committedInWindow, this.bestWindowHypothesis, tail.text]
+        : [tail.text];
+    const finalUncommitted = candidates.reduce((best, candidate) =>
+      Array.from(candidate).length > Array.from(best).length ? candidate : best,
+    );
 
     const lineText = cleanAsrText(this.committedDone + finalUncommitted);
     const lang = cleanLang(this.lineLang ?? tail.lang);

@@ -1,13 +1,13 @@
 ---
 name: asr-eval
-description: ASR 识别准确率 CER 评测基建的用法、用例格式、指标解读与首批发现
+description: ASR 识别准确率与实时到定稿稳定性评测的用法、用例格式、指标解读与首批发现
 metadata:
   node_type: memory
   type: project
   originSessionId: ba69b4a0-aadb-4514-8a44-a9107afccc29
 ---
 
-# ASR CER 评测基建（2026-07-22 建成）
+# ASR 评测基建（2026-07-22 建成）
 
 [project-direction](project-direction.md) 中「调参先建 CER 评测脚本」的 backlog 已落地。
 入口：`pnpm --filter @rt/macos eval-cer`（脚本 `apps/macos/test/eval-cer.ts`，沿用
@@ -18,6 +18,8 @@ metadata:
 - **两个 CER 对照**：`pipeline`（产品同款实时管线：流式喂入 + 滑动窗口提交，即用户实际
   看到的准确率）与 `offline`（同一模型对 VAD 切段做一次性离线解码 = 非流式上限），
   **两者之差≈实时管线自身引入的损耗**——把「模型不行」与「管线搞坏了」分开归因。
+- **评测门禁不只看 CER**：识别区到确认区的稳定性由独立的 Final 漂移衡量，不能用参考文本
+  CER 代替；入口与阈值参数见[项目地图](../project-map.md)「测试与构建位置」。
 - **LID 误判列**：senseVoice + auto + 用例声明语种时，统计定稿段语种≠声明语种的段数，
   量化 auto 模式语种误判（project-direction 定性的「准确率第一杠杆」自此可量化）。
 - 参数：`--models a,b` / `--language auto|zh|en|ja|ko`（量化「锁定语言 vs auto」）/
@@ -39,6 +41,10 @@ metadata:
   单位表记差异仍无法两全（％ 被归一化剥掉），跨模型对比时留意。
 - `pipeline` 列有轻微的运行间波动（解码 tick 节奏依赖 wall-clock 的自适应间隔），
   对比调参效果时建议跑两遍确认稳定；`offline` 列在同一配置下确定。
+- **真实语料要保留源响度，不要为了跑分默认归一化**：本项目的 `pipeline` CER 是
+  VAD 与实时提交在内的产品端到端指标，极低响度可能让 VAD 整段漏掉。遇到
+  `pipeline` 100% CER 而 `offline` 仍可识别的用例，先查波形响度和 VAD 出段，不要
+  直接归因于解码模型。
 - 自回归 transducer（reazon/parakeet）对过长段会整块坍缩（见 project-direction
   2026-07-04 条），其 `offline` 列只在 VAD 段长可控时才是可信上限。
 

@@ -6,7 +6,7 @@ Realtime Translator 是 pnpm workspace 单仓库。`@rt/core` 提供平台无关
 
 | 模块 | 职责与关键入口 |
 | --- | --- |
-| `packages/core` (`@rt/core`) | 领域类型、`AppBridge` 契约、设置/归档纯逻辑、模型注册表、macOS/Web 共用的实时转写管线，以及三端共用的翻译编排；公共入口为 `packages/core/src/index.ts`。 |
+| `packages/core` (`@rt/core`) | 领域类型、`AppBridge` 契约、设置/归档纯逻辑、模型注册表、macOS/Web 共用的实时转写管线、定稿漂移度量，以及三端共用的翻译编排；公共入口为 `packages/core/src/index.ts`。 |
 | `packages/ui` (`@rt/ui`) | 共享 Vue 3 单页界面，包含引导、主页、设置、归档和跨页状态；平台业务能力及设置、模型、归档持久化通过 `AppBridge` 访问宿主，纯界面状态可直接使用 DOM、媒体查询和 `localStorage` 等浏览器运行时能力。挂载入口为 `packages/ui/src/index.ts`，屏幕切换入口为 `packages/ui/src/App.vue`。 |
 | `apps/macos` (`@rt/macos`) | Electron 宿主：渲染层采集麦克风/系统音频，preload 暴露收紧后的 IPC，主进程管理设置、归档、模型和推理子进程；宿主入口是 `apps/macos/src/main/index.ts`，UI 适配入口是 `apps/macos/src/renderer/src/mac-bridge.ts`。 |
 | `apps/web` (`@rt/web`) | 浏览器 PWA 宿主：使用 IndexedDB/Cache Storage 存储，AudioWorklet 采集，Web Worker 中运行 sherpa-onnx WASM 与本地翻译，并管理 Service Worker 外壳缓存；应用入口是 `apps/web/src/main.ts`，平台契约实现是 `apps/web/src/bridge.ts`。 |
@@ -38,8 +38,9 @@ Realtime Translator 是 pnpm workspace 单仓库。`@rt/core` 提供平台无关
 
 ## 测试与构建位置
 
-- 根 `package.json` 的 `pnpm check` 运行 `@rt/core` 单元测试，以及 macOS、Web、iOS 三端类型检查。
-- `packages/core/src/**/*.test.ts` 覆盖设置、归档、模型源、转写管线和翻译决策等共享逻辑。
-- `apps/macos/test` 包含无 GUI 管线、CER 评测和翻译脚本；入口命令由 `apps/macos/package.json` 的 `test-pipeline`、`eval-cer` 和 `test-translate` 定义。
+- 根 `package.json` 的 `pnpm check` 运行 `@rt/core` 单元测试、macOS 评测语料导入器的纯逻辑测试，以及 macOS、Web、iOS 三端类型检查；它不下载语料或模型，也不执行耗时的识别精度门禁。
+- `packages/core/src/**/*.test.ts` 覆盖设置、归档、模型源、转写管线、定稿漂移统计和翻译决策等共享逻辑。
+- `apps/macos/test` 包含无 GUI 管线、CER 评测和翻译脚本；入口命令由 `apps/macos/package.json` 的 `test-pipeline`、`eval-cer` 和 `test-translate` 定义。`eval-cer` 同时报告产品管线 CER、整段离线 CER 和“实时最长结果到定稿”的 Final 漂移，并可用 `--max-cer`、`--max-drift` 将任一模型的加权结果设为失败门槛。日语快捷命令 `eval-cer-ja` 评测固定语言的完整语料，`eval-cer-ja:gate` 则以 SenseVoice 的产品管线 CER 不超过 20%、Final 漂移不超过 5% 为回归门禁。
+- `apps/macos/scripts/fetch-fleurs-eval.mjs` 通过 `fetch-eval-fleurs` 从固定 revision 的 FLEURS `ja_jp` test split 确定性抽取 100 条 CC-BY-4.0 语料，生成 16 kHz 单声道 PCM WAV、参考文本、语言元数据和带署名及音频哈希的 manifest。源 Parquet 缓存在 `apps/macos/test-audio/cache`，用例写入 `apps/macos/test-audio/eval/fleurs-ja-test`；两处均被 Git 忽略，需要评测的环境自行生成。
 - 根 `pnpm build` / `pnpm dist` 构建或打包 macOS；Web 和 iOS Web 资源分别由各自 `package.json` 的 `build` 脚本构建。iOS 原生工程位于 `apps/ios/ios/App`，注册表到 Swift 的生成入口是 `apps/ios/native-plugin/scripts/gen-asr-models-swift.mjs`。
 - `.github/workflows/ci.yml` 在 PR、`main` 分支推送和手动触发时执行根命令对应的测试/类型检查，并额外校验 iOS 生成的模型清单未与注册表漂移；Web 部署只在门禁通过后执行。

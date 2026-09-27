@@ -226,11 +226,12 @@ strips any `<|…|>` wrapping so its output matches macOS.
 
 ## Pipeline behavior vs the macOS reference
 
-Mirrors `apps/macos/src/main/pipeline.ts` intent: 16 kHz mono, **partial while speaking**
-(best-effort, throttled to ~0.6 s, re-decoding the in-progress speech buffer) + **final on
-segment end**. Segmentation is delegated to sherpa-onnx's Silero VAD (`minSilenceDuration`
-0.35 s for snappy finals; `maxSpeechDuration` 7 s so a non-stop talker still gets periodic
-finals) rather than the bespoke energy-minimum splitter macOS uses — a reasonable first cut.
-Text post-processing (strip CJK inter-character spaces, collapse repeated-token ASR
-hallucinations, drop punctuation-only segments) is ported from macOS's `cleanAsrText`.
-```
+Mirrors the current macOS/Web sliding-window pipeline intent: 16 kHz mono, **partial while
+speaking** (best-effort, throttled to ~0.6 s, re-decoding the in-progress speech buffer) +
+**final on segment end**. A final is emitted when natural VAD silence closes the segment; if
+speech continues, the plugin calls `vad.flush()` after roughly 7 s to force a boundary. The
+plugin does not rely on sherpa-onnx's `maxSpeechDuration` to provide periodic finals. Consecutive
+same-language partials provide a common-prefix safeguard when the final decode collapses; the
+chosen text and language are selected atomically. Text post-processing (strip CJK inter-character
+spaces, collapse repeated-token ASR hallucinations, drop punctuation-only segments) is ported
+from macOS's `cleanAsrText`.
